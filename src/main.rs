@@ -1,5 +1,6 @@
 mod config;
 mod domain;
+mod github;
 mod slack;
 mod secrets;
 mod store;
