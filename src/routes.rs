@@ -549,7 +549,11 @@ struct CreateJob {
     name: String,
     at: String,
     tz: String,
+    /// Either a Slack `C…` id or a `#name`, which the Plan Role produces.
     channel_id: String,
+    /// Optional: derived from the name when a name was given, so a caller that knows
+    /// only the channel does not have to send a field the server can work out.
+    #[serde(default)]
     channel_name: String,
     context: String,
     // Every optional field defaults. A client that sends only what it means to set is the

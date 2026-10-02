@@ -69,6 +69,59 @@ fn get(path: &str) -> Response {
     request("GET", path, None)
 }
 
+/// Like `request`, with extra headers, for asserting on the origin boundary.
+fn raw_request(method: &str, path: &str, body: Option<&str>, headers: &[(&str, &str)]) -> Response {
+    let url = base_url();
+    let rest = url
+        .strip_prefix("http://")
+        .expect("SLACKBOT_E2E_URL must be http://");
+    let (host_port, path) = match rest.split_once('/') {
+        Some((h, p)) => (h, format!("/{p}{path}")),
+        None => (rest, path.to_string()),
+    };
+
+    let mut stream = TcpStream::connect(host_port).expect("connect to the slackbot server");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+        .unwrap();
+
+    let payload = body.unwrap_or("");
+    // Caller headers come last so a test can override the default Content-Type;
+    // sending it twice left the first one winning.
+    let extra: String = headers
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}\r\n"))
+        .collect();
+    let default_type = if headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+    {
+        ""
+    } else {
+        "Content-Type: application/json\r\n"
+    };
+    let req = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\
+         {default_type}Content-Length: {}\r\n{extra}\r\n{payload}",
+        payload.len()
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let status = raw
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .unwrap_or("")
+        .to_string();
+    Response { status, body }
+}
+
 fn post(path: &str, body: serde_json::Value) -> Response {
     request("POST", path, Some(&body.to_string()))
 }
@@ -167,6 +220,88 @@ fn a_lookback_is_clamped_to_a_sane_range() {
 
     assert!((1..=72).contains(&hours), "clamped to {hours}");
     request("DELETE", &format!("/api/jobs/{id}"), None);
+}
+
+#[test]
+#[ignore = "needs a running server"]
+fn a_job_can_be_created_with_only_the_fields_that_matter() {
+    // Regression: `channel_name` had no serde default, so a caller sending just an id
+    // got a 422 before any validation ran — the same class of bug as the missing
+    // `previous_day` default.
+    let res = post(
+        "/api/jobs",
+        serde_json::json!({
+            "name": "Minimal", "at": "11:00", "tz": "UTC",
+            "channel_id": "C0A0RRC7P8B",
+            "context": "lookback", "prompt": "p"
+        }),
+    );
+    assert_eq!(res.status, 200, "got {}: {}", res.status, res.body);
+    let id = res.json()["id"].as_i64().unwrap();
+    request("DELETE", &format!("/api/jobs/{id}"), None);
+}
+
+#[test]
+#[ignore = "needs a running server"]
+fn a_channel_name_without_slack_is_a_clear_precondition_not_a_parse_error() {
+    // The Plan Role produces "#coot-ai"; resolving it needs a Slack client. Without one
+    // the user must be told what to do, not handed a deserialization failure.
+    let res = post(
+        "/api/jobs",
+        serde_json::json!({
+            "name": "By name", "at": "11:00", "tz": "UTC",
+            "channel_id": "#coot-ai", "context": "lookback", "prompt": "p"
+        }),
+    );
+    assert_ne!(res.status, 422, "a name must not fail as malformed JSON");
+    if res.status == 412 {
+        assert!(
+            res.body.contains("Slack"),
+            "the precondition must name what is missing: {}",
+            res.body
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs a running server"]
+fn a_cross_origin_approve_is_refused() {
+    // ADR-0001: loopback is not an authorisation boundary. A page the user happens to
+    // be visiting must not be able to post to their team channel.
+    let res = request("POST", "/api/drafts/1/approve", Some("{}"));
+    // A same-origin request with no Origin header passes the guard and reaches the
+    // handler; the cross-origin case is what must be refused, and it is checked by
+    // sending an Origin the tool does not own.
+    let _ = res;
+
+    let hostile = raw_request(
+        "POST",
+        "/api/drafts/1/approve",
+        Some("{}"),
+        &[
+            ("Origin", "https://evil.example"),
+            ("Sec-Fetch-Site", "cross-site"),
+        ],
+    );
+    assert_eq!(
+        hostile.status, 403,
+        "a cross-origin approve must be refused, got {}",
+        hostile.status
+    );
+}
+
+#[test]
+#[ignore = "needs a running server"]
+fn a_form_encoded_write_is_refused() {
+    // A cross-origin HTML form can send urlencoded without a preflight, so the content
+    // type is the cheap half of the same boundary.
+    let res = raw_request(
+        "POST",
+        "/api/drafts/1/approve",
+        Some(""),
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+    );
+    assert_eq!(res.status, 415, "got {}", res.status);
 }
 
 #[test]
