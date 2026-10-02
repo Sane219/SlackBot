@@ -361,6 +361,37 @@ impl FireRunner {
     }
 }
 
+/// The moment a Job was most recently due, if that moment is within the catch-up window.
+///
+/// Returns `None` when the Job is not due yet. Capped at one window back, so a machine
+/// that was off for a week records the misses through `mark_missed` rather than firing a
+/// week of stale posts on wake.
+fn next_due_at(job: &Job, at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    const CATCH_UP: chrono::Duration = chrono::Duration::minutes(30);
+
+    // Walk forward from the last Fire. A Job that has never fired is due at its most
+    // recent occurrence, which we get by asking for the next one and stepping back a day.
+    let start = match job.last_fired_at {
+        Some(last) => last,
+        None => {
+            let next = job.schedule.next_after(at)?;
+            // `next_after` is strictly after `at`, so the occurrence we want is a day
+            // earlier. If that is still in the future, the Job is simply not due.
+            return match next - chrono::Duration::days(1) {
+                due if due <= at && at - due <= CATCH_UP => Some(due),
+                _ => None,
+            };
+        }
+    };
+
+    let due = job.schedule.next_after(start)?;
+    if due <= at && at - due <= CATCH_UP {
+        Some(due)
+    } else {
+        None
+    }
+}
+
 /// Tick the clock: fire every Job that is due, and record the ones that were missed.
 ///
 /// Takes the database lock by path rather than a `&Connection`, so no guard is ever held
@@ -389,7 +420,7 @@ async fn tick_locked(
             // A disabled Job writes nothing: "skipped" would read as a missed post.
             continue;
         }
-        let Some(next) = job.schedule.next_after(at) else {
+        if job.schedule.next_after(at).is_none() {
             // An unparseable schedule is a config error. Record it visibly rather than
             // silently ignoring the Job.
             let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -406,10 +437,20 @@ async fn tick_locked(
             continue;
         };
 
-        // Due when its next occurrence is within the last tick window. Fires whose time
-        // passed while the process was down are handled by `mark_missed`.
-        if next <= at {
-            runner.fire(conn, &job, at).await?;
+        // A Job is due when its most recent occurrence has passed and it has not already
+        // fired for it.
+        //
+        // `next_after(at)` returns the next occurrence *strictly after* `at`, so it can
+        // never satisfy `next <= at`. Gating on it here meant the scheduler never fired
+        // anything at all. The due moment is `last_fired_at`'s successor, computed by
+        // walking forward from the last Fire — or from the previous occurrence when the
+        // Job has never fired.
+        let due_at = next_due_at(&job, at);
+
+        if let Some(due) = due_at {
+            // The database's (job, tick) index is the real duplicate guard, so re-firing
+            // within the same tick is a no-op rather than a second post.
+            runner.fire(conn, &job, due).await?;
             fired_any = true;
         }
     }
@@ -766,6 +807,96 @@ mod tests {
 
         let at = Utc.with_ymd_and_hms(2026, 10, 2, 4, 0, 0).unwrap();
         assert_eq!(mark_missed(&c(&conn), at).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_due_job_actually_fires() {
+        // The regression test for the bug that made the tool non-functional: tick gated
+        // on `next_after(at) <= at`, and `next_after` returns strictly after `at`, so the
+        // condition was never true and no Job could ever fire.
+        let conn = db();
+        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "Day Task: some content"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let runner = FireRunner {
+            source: Arc::new(FixedSource {
+                activity: vec![Activity::Slack {
+                    channel: "coot-ai".into(),
+                    message: slack_message(),
+                }],
+                fail_with: None,
+            }),
+            llm: Arc::new(llm(&server)),
+        };
+
+        // 04:05 UTC is 09:35 IST, five minutes after the Job's 09:30 slot.
+        let at = Utc.with_ymd_and_hms(2026, 10, 2, 4, 5, 0).unwrap();
+        tick(&runner, &conn, at).await.unwrap();
+
+        let fires = store::list_fires(&*c(&conn), 10).unwrap();
+        assert_eq!(
+            fires.len(),
+            1,
+            "a Job five minutes past its slot must fire; nothing else creates a Fire"
+        );
+        assert_eq!(store::list_unapproved(&*c(&conn)).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_job_is_not_fired_before_its_slot() {
+        let conn = db();
+        store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+
+        let server = MockServer::start().await;
+        let runner = FireRunner {
+            source: Arc::new(FixedSource {
+                activity: Vec::new(),
+                fail_with: None,
+            }),
+            llm: Arc::new(llm(&server)),
+        };
+
+        // 03:00 UTC is 08:30 IST, an hour before the slot.
+        let at = Utc.with_ymd_and_hms(2026, 10, 2, 3, 0, 0).unwrap();
+        tick(&runner, &conn, at).await.unwrap();
+
+        assert!(
+            store::list_fires(&*c(&conn), 10).unwrap().is_empty(),
+            "a Job must not fire an hour before its slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_job_does_not_refire_within_the_same_tick() {
+        let conn = db();
+        store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+
+        let server = MockServer::start().await;
+        let runner = FireRunner {
+            source: Arc::new(FixedSource {
+                activity: Vec::new(),
+                fail_with: None,
+            }),
+            llm: Arc::new(llm(&server)),
+        };
+
+        // Five minutes past the slot, so both ticks are inside the catch-up window.
+        let first = Utc.with_ymd_and_hms(2026, 10, 2, 4, 5, 0).unwrap();
+        tick(&runner, &conn, first).await.unwrap();
+        let second = first + chrono::Duration::seconds(20);
+        tick(&runner, &conn, second).await.unwrap();
+
+        // The (job, tick) index keys on the due moment, not the tick time, so the second
+        // tick resolves to the same due moment and is refused.
+        assert_eq!(store::list_fires(&*c(&conn), 10).unwrap().len(), 1);
     }
 
     #[tokio::test]

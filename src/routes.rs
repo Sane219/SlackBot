@@ -37,6 +37,75 @@ pub struct AppState {
 
 type ApiError = (StatusCode, String);
 
+/// Reject a request that did not come from this tool's own page.
+///
+/// The server binds loopback, which is not an authorisation boundary: any page in any
+/// browser can reach `127.0.0.1`. A cross-origin write could be triggered by a page the
+/// user simply opened.
+fn reject_cross_origin(headers: &axum::http::HeaderMap) -> Result<(), ApiError> {
+    // Modern browsers always send Sec-Fetch-Site on a same-origin request.
+    if let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        if site != "same-origin" && site != "none" {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "cross-origin request refused: this tool only accepts its own page".into(),
+            ));
+        }
+    }
+
+    // Fall back to Origin for a browser that omits Sec-Fetch-*.
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        let host = origin
+            .strip_prefix("http://")
+            .or_else(|| origin.strip_prefix("https://"))
+            .unwrap_or(origin);
+        // Loopback in any spelling: 127.0.0.1, localhost, or the IPv6 form.
+        let is_local = host.starts_with("127.")
+            || host.starts_with("[::1]")
+            || host.starts_with("localhost")
+            || host.starts_with("::1");
+        if !is_local {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "cross-origin request refused: this tool only accepts its own page".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Refuse a Draft with no text.
+///
+/// An empty body would post an empty message, which is indistinguishable from a bug in
+/// the channel and cannot be explained afterwards.
+fn reject_empty_draft(text: &str) -> Result<(), ApiError> {
+    if text.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "a draft cannot be empty".into()));
+    }
+    Ok(())
+}
+
+/// Require a JSON content type on a write.
+///
+/// A cross-origin HTML form can send `application/x-www-form-urlencoded`,
+/// `text/plain`, and `multipart/form-data` without a preflight, but not
+/// `application/json`. This is the cheap half of the same boundary.
+fn require_json_content_type(headers: &axum::http::HeaderMap) -> Result<(), ApiError> {
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if !content_type.starts_with("application/json") {
+        return Err((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "this endpoint accepts application/json only".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Take the database lock, recovering from a poisoned mutex.
 ///
 /// A panic while holding the lock poisons it. Refusing to serve afterwards would mean one
@@ -119,8 +188,10 @@ struct SaveResult {
 
 async fn save_credential(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<SaveCredential>,
 ) -> Result<Json<SaveResult>, ApiError> {
+    reject_cross_origin(&headers)?;
     let value = body.value.trim().to_string();
 
     // An empty value is rejected rather than stored: a blank credential fails later, at
@@ -174,8 +245,11 @@ struct VerifyResult {
 
 async fn verify_credential(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<SecretKindBody>,
 ) -> Result<Json<VerifyResult>, ApiError> {
+    reject_cross_origin(&headers)?;
+    require_json_content_type(&headers)?;
     let settings = crate::config::settings_path();
     let fail = |kind: &'static str, reason: String| VerifyResult {
         ok: false,
@@ -278,8 +352,10 @@ struct SaveLlm {
 
 async fn save_llm(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<SaveLlm>,
 ) -> Result<Json<SaveResult>, ApiError> {
+    reject_cross_origin(&headers)?;
     let base_url = body.base_url.trim().to_string();
     let model = body.model.trim().to_string();
 
@@ -363,8 +439,10 @@ struct PlanResponse {
 
 async fn plan(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<PlanRequest>,
 ) -> Result<Json<PlanResponse>, ApiError> {
+    reject_cross_origin(&headers)?;
     let description = body.description.trim().to_string();
     if description.is_empty() {
         return Err((
@@ -413,8 +491,10 @@ struct CreateJob {
 
 async fn create_job(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<CreateJob>,
 ) -> Result<Json<Job>, ApiError> {
+    reject_cross_origin(&headers)?;
     if body.name.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "a job needs a name".into()));
     }
@@ -488,8 +568,10 @@ struct UpdateJob {
 async fn update_job(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<UpdateJob>,
 ) -> Result<Json<Job>, ApiError> {
+    reject_cross_origin(&headers)?;
     let mut job = store::get_job(&lock(&state), id)?;
 
     if let Some(name) = body.name {
@@ -529,7 +611,9 @@ async fn update_job(
 async fn delete_job(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
 ) -> Result<StatusCode, ApiError> {
+    reject_cross_origin(&headers)?;
     store::delete_job(&lock(&state), id)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -593,8 +677,11 @@ struct EditDraft {
 async fn edit_draft(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<EditDraft>,
 ) -> Result<Json<Draft>, ApiError> {
+    reject_cross_origin(&headers)?;
+    reject_empty_draft(&body.text)?;
     store::update_draft_text(&lock(&state), id, &body.text)?;
     Ok(Json(store::get_draft(&lock(&state), id)?))
 }
@@ -602,7 +689,9 @@ async fn edit_draft(
 async fn discard_draft(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
 ) -> Result<StatusCode, ApiError> {
+    reject_cross_origin(&headers)?;
     store::discard_draft(&lock(&state), id)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -614,7 +703,9 @@ async fn discard_draft(
 async fn regenerate_draft(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Draft>, ApiError> {
+    reject_cross_origin(&headers)?;
     let draft = store::get_draft(&lock(&state), id)?;
     let runner = state.runner.as_ref().ok_or((
         StatusCode::PRECONDITION_FAILED,
@@ -683,7 +774,15 @@ struct ApproveResult {
 async fn approve(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<ApproveResult>, ApiError> {
+    // A page the user happens to be visiting can POST to loopback: DNS-rebinding and
+    // cross-origin form posts both reach this server, and a body-less POST needed no
+    // token. That would post to a team channel with no human clicking anything, which is
+    // precisely what ADR-0001 forbids. A same-origin check closes it.
+    reject_cross_origin(&headers)?;
+    require_json_content_type(&headers)?;
+
     let draft = store::get_draft(&lock(&state), id)?;
 
     if draft.approved {
@@ -831,34 +930,80 @@ mod tests {
     /// caller would mean something could post without a human clicking Approve.
     #[test]
     fn only_approve_reaches_slack() {
-        let sources = [
-            include_str!("slack.rs"),
-            include_str!("scheduler.rs"),
-            include_str!("routes.rs"),
+        // The previous version of this test skipped any file whose text merely mentioned
+        // `chat.postMessage` — which is `routes.rs`, the only file with a real caller. It
+        // therefore asserted nothing about the file that matters, and adding
+        // `slack.post(..)` to any other handler would have passed.
+        //
+        // Match on the *call signature* rather than on the substring `.post(`, which also
+        // appears in axum's routing builder (`get(..).post(..)`) and in reqwest.
+        // `routes.rs` is checked with this test's own body removed, so the pattern being
+        // matched does not match itself.
+        let routes_without_tests = include_str!("routes.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default()
+            .to_string();
+
+        let sources: [(&str, &str); 5] = [
+            ("slack.rs", include_str!("slack.rs")),
+            ("scheduler.rs", include_str!("scheduler.rs")),
+            ("routes.rs", routes_without_tests.as_str()),
+            ("main.rs", include_str!("main.rs")),
+            ("github.rs", include_str!("github.rs")),
         ];
 
-        for source in sources {
-            let callers = source.matches(".post(&").count();
-            // slack.rs holds the client itself; it defines the call site.
-            if source.contains("chat.postMessage") {
-                continue;
+        // `SlackClient::post(&self, channel: &str, text: &str)`, so a call is a `.post(`
+        // whose first argument is a `&` — routing and reqwest calls are bare paths or
+        // method values.
+        let mut call_sites: Vec<(&str, usize)> = Vec::new();
+        for (name, source) in sources {
+            for (index, line) in source.lines().enumerate() {
+                // Strip line comments properly: a doc comment mentioning `.post(&`
+                // must not count as a call site.
+                let code = match line.find("//") {
+                    Some(i) if !line[..i].contains('"') => line[..i].trim(),
+                    _ => line.trim(),
+                };
+                if code.starts_with("//") || code.is_empty() {
+                    continue;
+                }
+                if code.contains("chat.postMessage") {
+                    continue;
+                }
+                // The client building its own request is the definition, not a caller.
+                if name == "slack.rs" && code.contains("format!(\"{}/chat.postMessage\"") {
+                    continue;
+                }
+                if code.contains(".post(&") {
+                    call_sites.push((name, index + 1));
+                }
             }
-            assert_eq!(
-                callers, 0,
-                "something other than approve calls Slack's write API"
-            );
         }
 
-        // Exactly one place builds the write request. The endpoint name also appears in
-        // the doc comments, so count the call, not the string.
-        let client = include_str!("slack.rs");
-        let write_calls = client
-            .lines()
-            .filter(|l| l.contains("format!") && l.contains("chat.postMessage"))
-            .count();
         assert_eq!(
-            write_calls, 1,
-            "the Slack client should build exactly one postMessage request"
+            call_sites.len(),
+            1,
+            "SlackClient::post must be called from exactly one place, found {call_sites:?}"
+        );
+        assert_eq!(
+            call_sites[0].0, "routes.rs",
+            "the only call must be in the HTTP layer"
+        );
+
+        // And that place must be `approve`, so moving the call to another handler fails.
+        let routes = &routes_without_tests;
+        let call_line = call_sites[0].1;
+        let before = routes
+            .lines()
+            .take(call_line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let enclosing = before.rsplit("async fn ").next().unwrap_or("");
+        assert!(
+            enclosing.starts_with("approve"),
+            "the only Slack write must be inside `approve`, found it inside `{}`",
+            enclosing.split('(').next().unwrap_or("?")
         );
     }
 
