@@ -1,14 +1,27 @@
 # SlackBot
 
-A local Rust daemon that drafts Slack status posts from your real activity —
-your Slack messages and your Git history — on a schedule, and posts them only
-when you click Approve.
+A local Rust daemon that drafts Slack status posts from your real activity — your
+Slack messages and your work recorded in GitHub — on a schedule, and posts them
+only when you click Approve.
 
 `cargo run` starts an Axum server on `127.0.0.1:7317` and opens a browser UI.
-You configure the LLM, Slack credentials, and your posting routine once; after
-that it drafts. Nothing is ever posted without an explicit click.
+You configure the LLM, Slack credentials, and your posting routine once; after that
+it drafts. Nothing is ever posted without an explicit click.
 
-See [`idea.md`](./idea.md) for the full spec.
+## Before designing anything
+
+Read `docs/adr/` first. **Where an ADR and `idea.md` disagree, the ADR wins** —
+`idea.md` is the record of the original thinking, not current truth, and it carries
+a header mapping each reversal.
+
+The live design is worked as a wayfinding map at
+[#1](https://github.com/Sane219/SlackBot/issues/1).
+
+## Vocabulary
+
+`GLOSSARY.md` defines Draft, Fire, Job, Context Window, Evidence and Approve. Use
+those terms. The tool imposes no names or shapes for a team's status messages
+(ADR-0004) — those are learned per user and stored per Job.
 
 ## Agent skills
 

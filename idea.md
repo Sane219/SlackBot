@@ -1,10 +1,32 @@
 # slackbot — Idea Spec
 
-A local Rust daemon that drafts your three-times-a-day Slack status posts by
-feeding your real activity (Slack messages + Git history) to an LLM on a
-schedule, and posts them only when you click Approve.
+> **This document is superseded. Where it disagrees with `docs/adr/`, the ADR wins.**
+>
+> Kept as the record of the original thinking — what was argued, and why the design
+> moved. Four decisions below were reversed during design; the reasoning survives in
+> their placeholders so the reversal is auditable rather than looking like a mistake.
+>
+> Current decisions, in one place:
+>
+> | This document says | The ADR says |
+> |---|---|
+> | §6, §12: local `git log` is the primary source, GitHub optional | `0003`: GitHub leads, local git is the exception, repos discovered from activity |
+> | §11: seeded defaults for 09:30 / 14:30 / 18:30 and three canonical message shapes | `0004`: the tool imposes no vocabulary; names and shapes are learned per user |
+> | §7: honor `Retry-After` on Slack rate limits | No rate-limit headers are published for `xoxc` — pacing must be self-imposed |
+> | §2: drafts from your own activity; §5 has no recall concept | `0001`: Approve is the only path to Slack; `0002`: no recall, because `chat.delete` does not work on the session-token path |
+>
+> Two further facts were established by measurement and contradict nothing here but
+> are worth knowing: Slack's 1 req/min non-Marketplace penalty does **not** apply to a
+> session token (it is scoped to distributed apps), and GitHub's `commenter:` search
+> qualifier matches issue comments only — a reviewer's review comments are invisible to
+> it. See ticket [#7](https://github.com/Sane219/SlackBot/issues/7).
 
-Status: **Idea, pre-implementation.** No code written yet.
+A local Rust daemon that drafts your recurring Slack status posts by feeding your
+real activity to an LLM on a schedule, and posts them only when you click Approve.
+
+Status: **Idea, pre-implementation.** No code written yet. The live design is being
+worked as a wayfinding map at
+[#1](https://github.com/Sane219/SlackBot/issues/1).
 
 ---
 
