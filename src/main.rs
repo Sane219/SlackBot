@@ -1,5 +1,7 @@
 mod config;
 mod domain;
+mod slack;
+mod secrets;
 mod store;
 
 use axum::{
