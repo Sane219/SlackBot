@@ -253,6 +253,8 @@ pub struct Draft {
     /// True once a human approved it. There is no path to Slack without this.
     pub approved: bool,
     pub approved_at: Option<DateTime<Utc>>,
+    /// Hidden from the Inbox but retained, so descendants keep their lineage.
+    pub discarded: bool,
 }
 
 /// UTC now, named so tests read clearly.
