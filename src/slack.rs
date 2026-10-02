@@ -160,7 +160,7 @@ impl SlackClient {
     /// nothing to read — this is the whole rate-limit strategy.
     async fn pace(&self) {
         let wait_until = {
-            let mut last = self.last_request.lock().await;
+            let last = self.last_request.lock().await;
             match *last {
                 Some(prev) => prev + MIN_INTERVAL,
                 None => std::time::Instant::now(),
