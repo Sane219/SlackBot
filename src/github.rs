@@ -108,6 +108,7 @@ struct PullRef {
     title: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct GithubClient {
     http: reqwest::Client,
     token: Secret,

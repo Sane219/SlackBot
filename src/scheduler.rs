@@ -28,95 +28,104 @@ const FIRE_RETENTION_DAYS: i64 = 90;
 /// network or a keychain.
 ///
 /// A hand-rolled boxed-future trait rather than `async-trait`: one implementation seam
-/// does not justify a proc-macro dependency.
+/// does not justify a proc-macro dependency. The Job is taken **by value** so the future
+/// borrows nothing from the caller and is therefore `Send + 'static`, which is what axum
+/// requires of a handler's future.
 pub trait EvidenceSource: Send + Sync {
     /// Collect Activity for the window. A source that fails returns `Err`, never an
     /// empty vec, because "we did not look" and "nothing happened" must differ.
-    fn collect<'a>(
-        &'a self,
-        job: &'a Job,
+    fn collect(
+        &self,
+        job: Job,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Activity>, String>> + Send + 'a>>;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Activity>, String>> + Send>>;
 }
 
 /// A source backed by the two real integrations.
+#[derive(Clone)]
 pub struct LiveSource {
     pub slack: Option<SlackClient>,
     pub github: Option<GithubClient>,
-    /// The user's Slack `U…` id, needed to read their own messages.
-    pub slack_user_id: String,
     pub token_budget: usize,
 }
 
 impl EvidenceSource for LiveSource {
-    fn collect<'a>(
-        &'a self,
-        job: &'a Job,
+    fn collect(
+        &self,
+        job: Job,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Activity>, String>> + Send + 'a>>
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Activity>, String>> + Send>>
     {
+        // Cloning the Arc and moving it into the async block is what makes the future
+        // owned rather than borrowing `&self`, which is what axum needs in order to call
+        // this from a handler.
+        let me = self.clone();
         Box::pin(async move {
-        let mut collected: Vec<Activity> = Vec::new();
+            let mut collected: Vec<Activity> = Vec::new();
 
-        if let Some(slack) = &self.slack {
-            for channel in &job.context_channels() {
-                match slack.history(channel, from, to).await {
-                    Ok(messages) => {
-                        for message in messages {
-                            collected.push(Activity::Slack {
-                                channel: channel.clone(),
-                                message,
-                            });
+            if let Some(slack) = &me.slack {
+                for channel in &job.context_channels() {
+                    match slack.history(channel, from, to).await {
+                        Ok(messages) => {
+                            for message in messages {
+                                collected.push(Activity::Slack {
+                                    channel: channel.clone(),
+                                    message,
+                                });
+                            }
                         }
+                        Err(err) => return Err(err.to_string()),
                     }
-                    Err(err) => return Err(err.to_string()),
                 }
             }
-        }
 
-        if let Some(github) = &self.github {
-            // Discovery is a locator only; the actual collection is per-repo.
-            let repos = github
-                .discover_repos(from - chrono::Duration::days(30))
-                .await
-                .map_err(|e| e.to_string())?;
+            if let Some(github) = &me.github {
+                // Discovery is a locator only; the actual collection is per-repo.
+                let repos = github
+                    .discover_repos(from - chrono::Duration::days(30))
+                    .await
+                    .map_err(|e| e.to_string())?;
 
-            for repo in repos {
-                let Some((owner, name)) = repo.split_once('/') else {
-                    continue;
-                };
-                match github.repo_activity(owner, name, from, to).await {
-                    Ok(activity) => collected.extend(activity.into_iter().map(Activity::Github)),
-                    Err(err) => return Err(err.to_string()),
+                for repo in repos {
+                    let Some((owner, name)) = repo.split_once('/') else {
+                        continue;
+                    };
+                    match github.repo_activity(owner, name, from, to).await {
+                        Ok(activity) => {
+                            collected.extend(activity.into_iter().map(Activity::Github))
+                        }
+                        Err(err) => return Err(err.to_string()),
+                    }
                 }
             }
-        }
 
-        Ok(collected)
+            Ok(collected)
         })
     }
 }
 
 /// A source that returns a fixed list, for tests.
+#[derive(Clone)]
 pub struct FixedSource {
     pub activity: Vec<Activity>,
     pub fail_with: Option<String>,
 }
 
 impl EvidenceSource for FixedSource {
-    fn collect<'a>(
-        &'a self,
-        _job: &'a Job,
+    fn collect(
+        &self,
+        _job: Job,
         _from: DateTime<Utc>,
         _to: DateTime<Utc>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Activity>, String>> + Send + 'a>>
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Activity>, String>> + Send>>
     {
+        let me = self.clone();
         Box::pin(async move {
-            match &self.fail_with {
+            match &me.fail_with {
                 Some(reason) => Err(reason.clone()),
-                None => Ok(self.activity.clone()),
+                None => Ok(me.activity.clone()),
             }
         })
     }
@@ -130,6 +139,27 @@ impl Job {
     }
 }
 
+/// What a Fire collected, before anything is written. The outcome is decided here so a
+/// collect failure is a `failed` Fire rather than a silent gap.
+pub struct Collected {
+    pub rendered: Rendered,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub outcome: FireOutcome,
+    pub error: Option<String>,
+}
+
+/// A Fire that has been collected and recorded, awaiting its Draft.
+///
+/// Returned from `record_fire_at` so the caller can drop the database lock before
+/// calling the model: a Fire's network work must not block every other request.
+pub struct PendingFire {
+    pub fire_id: i64,
+    pub rendered: Rendered,
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+}
+
 /// One run of the loop: decide what is due, fire it, record it.
 pub struct FireRunner {
     pub source: Arc<dyn EvidenceSource>,
@@ -137,27 +167,72 @@ pub struct FireRunner {
 }
 
 impl FireRunner {
-    /// Fire a Job if it is due at `at`.
+    /// Fire a Job now: collect, render, record, draft.
     ///
-    /// Returns the Fire row that was written, or `None` when this (job, tick) was
-    /// already recorded — the duplicate-due-time guard.
+    /// Takes the database lock by path and takes it in short steps, because a Fire makes
+    /// network calls and a guard held across an await would be neither `Send` nor fair to
+    /// the HTTP handlers sharing the same database.
     pub async fn fire(
         &self,
-        conn: &rusqlite::Connection,
+        conn: &std::sync::Mutex<rusqlite::Connection>,
         job: &Job,
         at: DateTime<Utc>,
     ) -> Result<Option<Fire>, String> {
-        let tick = tick_key(at);
+        // Collect with nothing locked: this is the slow part.
+        let collected = self.collect_for_fire(job, at).await;
+
+        let (fire_id, seed) = {
+            let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
+            let fire_id = self.record(&guard, job.id, at, &collected)?;
+            let seed = self.seed_text(&guard, job.id).unwrap_or(None);
+            (fire_id, seed)
+        };
+
+        let Some(fire_id) = fire_id else {
+            return Ok(None);
+        };
+
+        let text = self.compose_text(job, &collected, seed).await;
+
+        let fire = {
+            let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
+            self.write_draft(
+                &guard,
+                job,
+                fire_id,
+                collected.rendered,
+                collected.from,
+                collected.to,
+                at,
+                text,
+            )?;
+            store::get_fire(&guard, fire_id).map_err(|e| e.to_string())?
+        };
+
+        Ok(Some(fire))
+    }
+
+    /// Collect, render and record the Fire. No draft is written yet.
+    ///
+    /// Split out so the caller can release the database lock before the model is called:
+    /// a Fire's network work must not block every other request.
+    /// Collect and render, but write nothing. Takes no connection: the network work
+    /// happens here, and holding the database lock across it would block every other
+    /// request for the seconds a Fire takes.
+    pub async fn collect_for_fire(
+        &self,
+        job: &Job,
+        at: DateTime<Utc>,
+    ) -> Collected {
         let (from, to) = job.context_window.resolve(at);
 
-        // Collect first. A source that fails still produces a Fire row, named.
-        let (activity, status, collect_error) = match self.source.collect(job, from, to).await {
+        let (activity, status, error) = match self.source.collect(job.clone(), from, to).await {
             Ok(activity) => {
                 // One integration failing is a partial Fire, not a failed one: a partial
                 // day is still worth a draft.
                 let status = SourceStatus {
-                    slack_ok: self.source_has_slack(),
-                    github_ok: self.source_has_github(),
+                    slack_ok: true,
+                    github_ok: true,
                 };
                 (activity, status, None)
             }
@@ -165,8 +240,7 @@ impl FireRunner {
         };
 
         let rendered = evidence::render(&activity, from, to, status, DEFAULT_TOKEN_BUDGET);
-
-        let outcome = if let Some(reason) = &collect_error {
+        let outcome = if error.is_some() {
             FireOutcome::Failed
         } else if rendered.partial {
             FireOutcome::Partial
@@ -174,43 +248,91 @@ impl FireRunner {
             FireOutcome::Drafted
         };
 
-        let fire_id = store::record_fire(
-            conn,
-            job.id,
-            at,
+        Collected {
+            rendered,
+            from,
+            to,
             outcome,
-            rendered.no_signal,
-            collect_error.as_deref(),
-            tick,
+            error,
+        }
+    }
+
+    /// Record a Fire that has been collected. Synchronous: no network, so holding the
+    /// connection is free.
+    pub fn record(
+        &self,
+        conn: &rusqlite::Connection,
+        job_id: i64,
+        at: DateTime<Utc>,
+        collected: &Collected,
+    ) -> Result<Option<i64>, String> {
+        store::record_fire(
+            conn,
+            job_id,
+            at,
+            collected.outcome,
+            collected.rendered.no_signal,
+            collected.error.as_deref(),
+            tick_key(at),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())
+    }
 
-        // The index refused the insert: this due time was already handled.
-        let Some(fire_id) = fire_id else {
-            return Ok(None);
-        };
+    /// Compose the Draft's text. Async and lock-free: the model call happens here, then
+    /// the caller writes the result in one short step.
+    pub async fn compose_text(&self, job: &Job, collected: &Collected, seed: Option<String>) -> String {
+        // A Fire that collected nothing never calls the model: the gap marker is a
+        // decision, not a prompt.
+        if collected.rendered.no_signal {
+            return NO_SIGNAL_TEXT.to_string();
+        }
 
+        self.llm
+            .draft(job, &collected.rendered.text, seed.as_deref())
+            .await
+            .unwrap_or_else(|err| format!("DRAFT FAILED: {err}"))
+    }
+
+    /// The seed text for a Draft: the previous cycle's Draft, or none.
+    ///
+    /// Synchronous so the caller can read it before releasing the lock for the model call.
+    pub fn seed_text(
+        &self,
+        conn: &rusqlite::Connection,
+        job_id: i64,
+    ) -> Result<Option<String>, String> {
+        let parent = self.latest_draft_for(conn, job_id)?;
+        // A gap marker is never a useful seed: seeding from "NO SIGNAL" would hand the
+        // model an empty previous message to continue.
+        Ok(match parent {
+            Some(id) => store::get_draft(conn, id)
+                .ok()
+                .map(|d| d.text)
+                .filter(|t| t != NO_SIGNAL_TEXT),
+            None => None,
+        })
+    }
+
+    /// Write the Draft for a recorded Fire. Synchronous: the model has already been
+    /// called by the caller, so no lock is held across an await.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_draft(
+        &self,
+        conn: &rusqlite::Connection,
+        job: &Job,
+        fire_id: i64,
+        rendered: Rendered,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        at: DateTime<Utc>,
+        text: String,
+    ) -> Result<(), String> {
         // A Fire that collected nothing still gets a Draft, carrying the gap marker. The
-        // honest outcome is a visible gap, not a hedge and not silence.
+        // text arrives already composed so no model call happens under the lock.
         let text = if rendered.no_signal {
             NO_SIGNAL_TEXT.to_string()
         } else {
-            // Seed from the previous cycle's Draft, preferring the last edited ancestor.
-            // A gap marker is never a useful seed: seeding from "NO SIGNAL" would hand
-            // the model an empty previous message to continue.
-            let parent = self.latest_draft_for(conn, job.id)?;
-            let parent_text = match parent {
-                Some(id) => store::get_draft(conn, id)
-                    .ok()
-                    .map(|d| d.text)
-                    .filter(|t| t != NO_SIGNAL_TEXT),
-                None => None,
-            };
-
-            self.llm
-                .draft(job, &rendered.text, parent_text.as_deref())
-                .await
-                .unwrap_or_else(|err| format!("DRAFT FAILED: {err}"))
+            text
         };
 
         let draft = Draft {
@@ -232,12 +354,10 @@ impl FireRunner {
         };
 
         store::insert_draft(conn, &draft).map_err(|e| e.to_string())?;
-
-        Ok(store::get_fire(conn, fire_id).ok())
+        Ok(())
     }
 
-    /// The newest live Draft for a Job, or `None` on a first Fire.
-    fn latest_draft_for(
+    pub fn latest_draft_for(
         &self,
         conn: &rusqlite::Connection,
         job_id: i64,
@@ -260,13 +380,27 @@ impl FireRunner {
     }
 }
 
-/// Tick the clock: for every enabled Job, fire it if due, and record the rest as missed.
+/// Tick the clock: fire every Job that is due, and record the ones that were missed.
+///
+/// Takes the database lock by path rather than a `&Connection`, so no guard is ever held
+/// across the network calls inside a Fire.
 pub async fn tick(
     runner: &FireRunner,
-    conn: &rusqlite::Connection,
+    conn: &std::sync::Mutex<rusqlite::Connection>,
     at: DateTime<Utc>,
 ) -> Result<(), String> {
-    let jobs = store::list_jobs(conn).map_err(|e| e.to_string())?;
+    tick_locked(runner, conn, at).await
+}
+
+async fn tick_locked(
+    runner: &FireRunner,
+    conn: &std::sync::Mutex<rusqlite::Connection>,
+    at: DateTime<Utc>,
+) -> Result<(), String> {
+    let jobs = {
+        let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
+        store::list_jobs(&guard).map_err(|e| e.to_string())?
+    };
     let mut fired_any = false;
 
     for job in jobs {
@@ -274,12 +408,12 @@ pub async fn tick(
             // A disabled Job writes nothing: "skipped" would read as a missed post.
             continue;
         }
-
         let Some(next) = job.schedule.next_after(at) else {
             // An unparseable schedule is a config error. Record it visibly rather than
             // silently ignoring the Job.
+            let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
             store::record_fire(
-                conn,
+                &guard,
                 job.id,
                 at,
                 FireOutcome::Failed,
@@ -301,7 +435,8 @@ pub async fn tick(
 
     if !fired_any {
         // Still prune occasionally so the log stays bounded.
-        store::prune(conn, at, DRAFT_RETENTION_DAYS, FIRE_RETENTION_DAYS)
+        let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
+        store::prune(&guard, at, DRAFT_RETENTION_DAYS, FIRE_RETENTION_DAYS)
             .map_err(|e| e.to_string())?;
     }
 
@@ -393,6 +528,18 @@ mod tests {
         }
     }
 
+    /// The scheduler's database handle, matching what `fire` and `tick` take.
+    fn db() -> std::sync::Mutex<rusqlite::Connection> {
+        std::sync::Mutex::new(store::open_in_memory().unwrap())
+    }
+
+    /// Lock the handle for a store call.
+    fn c<'a>(
+        conn: &'a std::sync::Mutex<rusqlite::Connection>,
+    ) -> std::sync::MutexGuard<'a, rusqlite::Connection> {
+        conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn slack_message() -> crate::slack::SlackMessage {
         crate::slack::SlackMessage {
             ts: "1790000000.000100".into(),
@@ -421,9 +568,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_fire_produces_exactly_one_draft() {
-        let conn = store::open_in_memory().unwrap();
-        let job_id = store::insert_job(&conn, &job("Day Task")).unwrap();
-        let job = store::get_job(&conn, job_id).unwrap();
+        let conn = db();
+        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+        let job = store::get_job(&*c(&conn), job_id).unwrap();
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -449,7 +596,7 @@ mod tests {
         let fire = runner.fire(&conn, &job, at).await.unwrap().unwrap();
 
         assert_eq!(fire.outcome, FireOutcome::Drafted);
-        let inbox = store::list_unapproved(&conn).unwrap();
+        let inbox = store::list_unapproved(&*c(&conn)).unwrap();
         assert_eq!(inbox.len(), 1);
         assert!(inbox[0].text.contains("jitter"));
         assert!(!inbox[0].no_signal);
@@ -457,9 +604,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_window_produces_the_gap_marker_not_a_hedge() {
-        let conn = store::open_in_memory().unwrap();
-        let job_id = store::insert_job(&conn, &job("Progress")).unwrap();
-        let job = store::get_job(&conn, job_id).unwrap();
+        let conn = db();
+        let job_id = store::insert_job(&*c(&conn), &job("Progress")).unwrap();
+        let job = store::get_job(&*c(&conn), job_id).unwrap();
 
         let server = MockServer::start().await;
         let runner = FireRunner {
@@ -476,18 +623,18 @@ mod tests {
         // The Fire is recorded, and its Draft says nothing happened.
         assert_eq!(fire.outcome, FireOutcome::Drafted);
         assert!(fire.no_signal);
-        let inbox = store::list_unapproved(&conn).unwrap();
+        let inbox = store::list_unapproved(&*c(&conn)).unwrap();
         assert_eq!(inbox[0].text, NO_SIGNAL_TEXT);
         assert!(inbox[0].no_signal);
         // No signal must not have called the model at all.
-        assert_eq!(store::list_fires(&conn, 10).unwrap().len(), 1);
+        assert_eq!(store::list_fires(&*c(&conn), 10).unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn a_collect_failure_records_a_failed_fire_with_the_reason() {
-        let conn = store::open_in_memory().unwrap();
-        let job_id = store::insert_job(&conn, &job("Day Task")).unwrap();
-        let job = store::get_job(&conn, job_id).unwrap();
+        let conn = db();
+        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+        let job = store::get_job(&*c(&conn), job_id).unwrap();
 
         let server = MockServer::start().await;
         let runner = FireRunner {
@@ -507,9 +654,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_due_time_is_not_fired_twice_in_the_same_tick() {
-        let conn = store::open_in_memory().unwrap();
-        let job_id = store::insert_job(&conn, &job("Day Task")).unwrap();
-        let job = store::get_job(&conn, job_id).unwrap();
+        let conn = db();
+        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+        let job = store::get_job(&*c(&conn), job_id).unwrap();
 
         let server = MockServer::start().await;
         let runner = FireRunner {
@@ -527,17 +674,17 @@ mod tests {
         assert!(runner.fire(&conn, &job, at).await.unwrap().is_some());
         // Same 20s tick: the index refuses a second row.
         assert!(runner.fire(&conn, &job, at + chrono::Duration::seconds(5)).await.unwrap().is_none());
-        assert_eq!(store::list_fires(&conn, 10).unwrap().len(), 1);
+        assert_eq!(store::list_fires(&*c(&conn), 10).unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn a_draft_seeds_from_the_previous_cycle() {
-        let conn = store::open_in_memory().unwrap();
-        let job_id = store::insert_job(&conn, &job("Day Task")).unwrap();
-        let job = store::get_job(&conn, job_id).unwrap();
+        let conn = db();
+        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+        let job = store::get_job(&*c(&conn), job_id).unwrap();
 
         // Seed a prior Draft the "user" already wrote.
-        let fire_id = store::record_fire(&conn, job_id, Utc::now(), FireOutcome::Drafted, false, None, 1)
+        let fire_id = store::record_fire(&*c(&conn), job_id, Utc::now(), FireOutcome::Drafted, false, None, 1)
             .unwrap()
             .unwrap();
         let previous = Draft {
@@ -557,7 +704,7 @@ mod tests {
             approved_at: None,
             discarded: false,
         };
-        store::insert_draft(&conn, &previous).unwrap();
+        store::insert_draft(&*c(&conn), &previous).unwrap();
 
         let server = MockServer::start().await;
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -597,53 +744,53 @@ mod tests {
     #[test]
     fn a_job_that_never_fired_is_not_marked_missed() {
         // No baseline to judge a miss against.
-        let conn = store::open_in_memory().unwrap();
-        store::insert_job(&conn, &job("Day Task")).unwrap();
-        let marked = mark_missed(&conn, Utc::now()).unwrap();
+        let conn = db();
+        store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+        let marked = mark_missed(&*c(&conn), Utc::now()).unwrap();
         assert_eq!(marked, 0);
     }
 
     #[test]
     fn a_job_that_fired_yesterday_and_was_off_today_is_marked_missed() {
-        let conn = store::open_in_memory().unwrap();
-        let job_id = store::insert_job(&conn, &job("Day Task")).unwrap();
+        let conn = db();
+        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
 
         // Record a Fire from yesterday at the job's own 09:30 IST.
         let yesterday = Utc.with_ymd_and_hms(2026, 10, 1, 4, 0, 0).unwrap();
-        store::record_fire(&conn, job_id, yesterday, FireOutcome::Drafted, false, None, 1)
+        store::record_fire(&*c(&conn), job_id, yesterday, FireOutcome::Drafted, false, None, 1)
             .unwrap();
 
         // Two days later, the app is starting up.
         let later = Utc.with_ymd_and_hms(2026, 10, 3, 12, 0, 0).unwrap();
-        let marked = mark_missed(&conn, later).unwrap();
+        let marked = mark_missed(&*c(&conn), later).unwrap();
 
         // Missed, recorded, and NOT retro-fired: no Draft was created.
         assert!(marked > 0);
-        let fires = store::list_fires(&conn, 50).unwrap();
+        let fires = store::list_fires(&*c(&conn), 50).unwrap();
         assert!(fires.iter().any(|f| f.outcome == FireOutcome::Missed));
-        assert!(store::list_unapproved(&conn).unwrap().is_empty());
+        assert!(store::list_unapproved(&*c(&conn)).unwrap().is_empty());
     }
 
     #[test]
     fn a_disabled_job_is_not_fired() {
-        let conn = store::open_in_memory().unwrap();
+        let conn = db();
         let mut disabled = job("Day Task");
         disabled.enabled = false;
-        store::insert_job(&conn, &disabled).unwrap();
+        store::insert_job(&*c(&conn), &disabled).unwrap();
 
         let at = Utc.with_ymd_and_hms(2026, 10, 2, 4, 0, 0).unwrap();
-        assert_eq!(mark_missed(&conn, at).unwrap(), 0);
+        assert_eq!(mark_missed(&*c(&conn), at).unwrap(), 0);
     }
 
     #[tokio::test]
     async fn an_unreadable_schedule_is_recorded_as_failed_not_ignored() {
-        let conn = store::open_in_memory().unwrap();
+        let conn = db();
         let mut broken = job("Day Task");
         broken.schedule = Schedule::Daily {
             at: "half past nine".into(),
             tz: "Asia/Kolkata".into(),
         };
-        let job_id = store::insert_job(&conn, &broken).unwrap();
+        let job_id = store::insert_job(&*c(&conn), &broken).unwrap();
 
         let server = MockServer::start().await;
         let runner = FireRunner {
@@ -654,7 +801,7 @@ mod tests {
         tick(&runner, &conn, Utc::now()).await.unwrap();
 
         // A config error must be visible, not a Job that quietly never runs.
-        let fires = store::list_fires(&conn, 10).unwrap();
+        let fires = store::list_fires(&*c(&conn), 10).unwrap();
         assert_eq!(fires.len(), 1);
         assert_eq!(fires[0].job_id, job_id);
         assert_eq!(fires[0].outcome, FireOutcome::Failed);

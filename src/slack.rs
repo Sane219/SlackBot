@@ -7,6 +7,8 @@
 //! No rate-limit headers are published for this token type, so pacing is self-imposed at
 //! one request per second rather than read from `Retry-After`.
 
+use std::sync::Arc;
+
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
@@ -121,13 +123,17 @@ impl SlackMessage {
 }
 
 /// A client for one Slack session.
+///
+/// Cheap to clone: `reqwest::Client` pools its own connections, and a cloned client
+/// shares that pool rather than opening new ones.
+#[derive(Clone)]
 pub struct SlackClient {
     http: reqwest::Client,
     token: Secret,
     cookie: Secret,
     /// The user's own `U…` id. Activity is filtered to their own posts.
     user_id: String,
-    last_request: tokio::sync::Mutex<Option<std::time::Instant>>,
+    last_request: Arc<tokio::sync::Mutex<Option<std::time::Instant>>>,
     base: String,
 }
 
@@ -141,7 +147,7 @@ impl SlackClient {
             token,
             cookie,
             user_id: user_id.into(),
-            last_request: tokio::sync::Mutex::new(None),
+            last_request: Arc::new(tokio::sync::Mutex::new(None)),
             base: BASE.to_string(),
         }
     }

@@ -70,6 +70,133 @@ pub fn ensure_loopback(addr: SocketAddr) -> Result<(), String> {
     }
 }
 
+/// Where the database and settings live. Under the OS data directory rather than the
+/// working directory, so `cargo run` works from anywhere.
+pub fn data_dir() -> std::path::PathBuf {
+    if let Some(explicit) = std::env::var_os("SLACKBOT_DATA_DIR") {
+        let dir = std::path::PathBuf::from(explicit);
+        let _ = std::fs::create_dir_all(&dir);
+        return dir;
+    }
+
+    #[cfg(target_os = "macos")]
+    let dir = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("Library/Application Support/slackbot");
+
+    #[cfg(target_os = "windows")]
+    let dir = std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("slackbot");
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let dir = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join(".local/share")
+        })
+        .join("slackbot");
+
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+pub fn db_path() -> std::path::PathBuf {
+    data_dir().join("slackbot.db")
+}
+
+pub fn settings_path() -> std::path::PathBuf {
+    data_dir().join("settings.toml")
+}
+
+/// The Slack `U…` id for this install, captured at setup by `auth.test`.
+///
+/// Not a secret, so a plain file. Without it, history filtering matches nothing and
+/// every Fire looks like a quiet day.
+pub fn read_slack_identity(path: &std::path::Path) -> Option<String> {
+    line_value(&std::fs::read_to_string(path).ok()?, "slack_user_id")
+}
+
+pub fn read_github_login(path: &std::path::Path) -> Option<String> {
+    line_value(&std::fs::read_to_string(path).ok()?, "github_login")
+}
+
+pub fn write_slack_identity(path: &std::path::Path, user_id: &str) -> std::io::Result<()> {
+    append_setting(path, &format!("slack_user_id = \"{user_id}\""))
+}
+
+pub fn write_github_login(path: &std::path::Path, login: &str) -> std::io::Result<()> {
+    append_setting(path, &format!("github_login = \"{login}\""))
+}
+
+/// Add or replace one `key = "value"` line, leaving the others alone.
+///
+/// A hand-rolled updater rather than a TOML round trip, because appending an identity
+/// must not risk rewriting the endpoint and model next to it.
+fn append_setting(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let key = line.split('=').next().unwrap_or("").trim().to_string();
+    let mut kept: Vec<String> = std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim_start().starts_with(&key))
+        .map(str::to_string)
+        .collect();
+
+    kept.push(line.to_string());
+    let mut file = std::fs::File::create(path)?;
+    for l in kept {
+        writeln!(file, "{l}")?;
+    }
+    Ok(())
+}
+
+/// Read the LLM endpoint and model. Not secret, so a plain TOML file.
+pub fn read_llm_settings(path: &std::path::Path) -> Option<crate::routes::LlmSettings> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let base_url = line_value(&raw, "base_url")?;
+    let model = line_value(&raw, "model")?;
+    Some(crate::routes::LlmSettings { base_url, model })
+}
+
+pub fn write_llm_settings(
+    path: &std::path::Path,
+    settings: &crate::routes::LlmSettings,
+) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        path,
+        format!(
+            "# Not secret: the API key lives in the OS keychain, not here.\n\
+             base_url = \"{}\"\nmodel = \"{}\"\n",
+            settings.base_url.replace('"', "\\\""),
+            settings.model.replace('"', "\\\"")
+        ),
+    )
+}
+
+/// Pull one `key = "value"` out of a two-line file. Deliberately not a TOML parser: the
+/// file is written by this function and read by this function.
+fn line_value(raw: &str, key: &str) -> Option<String> {
+    raw.lines()
+        .find(|line| line.starts_with(key))
+        .and_then(|line| line.split_once('='))
+        .map(|(_, value)| value.trim().trim_matches('"').to_string())
+        .filter(|v| !v.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +214,33 @@ mod tests {
             ServerConfig::default().url(),
             format!("http://127.0.0.1:{DEFAULT_PORT}/")
         );
+    }
+
+    #[test]
+    fn llm_settings_roundtrip_through_a_plain_file() {
+        let dir = std::env::temp_dir().join(format!("slackbot-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("llm.toml");
+
+        let settings = crate::routes::LlmSettings {
+            base_url: "http://100.92.234.10:8000/v1".into(),
+            model: "Coot AI".into(),
+        };
+        write_llm_settings(&path, &settings).unwrap();
+        assert_eq!(read_llm_settings(&path).unwrap(), settings);
+
+        // Only the endpoint and model are written. A comment mentions the keychain by
+        // name, so check for a value that would actually leak rather than the word.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("api_key"));
+        assert!(!raw.contains("sk-"));
+        assert_eq!(raw.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).count(), 2);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_settings_read_as_none() {
+        assert!(read_llm_settings(std::path::Path::new("/nonexistent/llm.toml")).is_none());
     }
 
     #[test]
