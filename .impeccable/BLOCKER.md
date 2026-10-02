@@ -1,63 +1,77 @@
-# Comp round blocked: no image generator on this machine
+# Impeccable: build state and known gaps
 
-`impeccable build-phase advance` fails the `comps` gate because it counts image files
-under `.impeccable/mocks/`. There is no way to produce them here:
+## Build path taken: code-led, not comp-led
 
-- `OPENAI_API_KEY` is unset, so `impeccable generate-image` refuses.
-- This harness exposes no native image tool.
-- v4.2.0 has no `serve-question` verb, so the decision page cannot draw wireframes either.
+`.impeccable/config.json` records `"buildPath": "comp"`. That was the recorded
+preference, and it was not what happened. This file states what did.
 
-Three composition records exist under `.impeccable/mocks/` as `.json` sidecars, with
-composition A carrying `"approved": true`. They are **specifications, not renders.** No
-image was fabricated to satisfy the gate.
+**The comp round cannot run on this machine.** Three independent blockers:
 
-The compositions were put to the user through the structured question tool, which is the
-documented fallback approval mechanism. Approval is genuine and recorded.
+1. `OPENAI_API_KEY` is unset, so `impeccable generate-image` refuses.
+2. No harness-native image tool is available.
+3. `serve-question` is absent, so the decision page cannot draw wireframe schematics
+   either.
 
-Consequence: the build proceeds **code-first** for this surface rather than comp-led. The
-ambiguity that a rendered comp would have resolved — exact column proportions and the
-density of the timeline spine — is carried in the surface brief's FIRST VIEWPORT block
-instead, and the finish review audits the build against that contract rather than
-against a measured pixel target.
+Comp-first needs at least one of those. With none, the build proceeded **code-led**:
+the direction contract in `.impeccable/surfaces/` carried the ambition, and the finish
+work audited the render against that contract rather than against measured pixels.
 
-To make this surface comp-led later: set `OPENAI_API_KEY`, then re-run
+**No image was fabricated to pass the `comps` gate.** `.impeccable/mocks/` holds three
+composition records as `.json` sidecars. They are specifications, not renders.
+
+To make a future surface comp-led: set `OPENAI_API_KEY`, then run
 `impeccable build-phase advance`.
 
-## Rendered in a browser
+## Verdict on the world: code-led build, and it holds up
 
-The comp round could not run (no image generator), but the surface was rendered and
-inspected in headless Chrome at 1440x900 and 390x844, on every tab, with the
-screenshots in `.impeccable/review/`.
+The direction was the incident postmortem wall — seed `1d97c764`, chosen by the roll,
+then pushed bolder by the user into the wall's gap discipline. Rendered in headless
+Chrome at 1440×900 and 390×844 and inspected on every tab, the built world matches the
+contract:
 
-What rendering found that reading the code did not:
+- One type size, rank by weight and rule
+- One amber, one vermilion, used once each
+- No shadows except the failure inset; one radius, on the hatch
+- A gap drawn as a hatched void with its span printed
+- WCAG AA measured, not asserted: every ink token clears 4.5:1
 
-- **Every view rendered at once.** `.view { display: flex }` beat the `hidden`
-  attribute's UA `display: none`, so the Jobs and Setup panels sat below the Inbox.
-  The DOM probe reported `hidden` as set and said everything was fine.
-- **A Fire's error reason was clipped** mid-word inside the 180px spine — the one text
-  a user needs when something is wrong.
-- **Save and Verify wrapped under the field** instead of beside it, because the action
-  column was 7rem and had to hold a mark plus two buttons.
-- **The window label showed a Draft's window on the Setup board**, because only the
-  20s poll updated it and a tab click did not.
-- **A 404 for favicon.ico** was the sole console error on a clean load.
+`DESIGN.md` and `.impeccable/design.json` now record the world from the **built CSS**,
+verified token by token. `impeccable doctor` reports no drift.
 
-Console is now clean at both widths: no errors, no failed requests, no page errors.
-Every tab stop is visible with a focus ring, and the accessibility tree builds.
+## What rendering found that reading the code did not
 
-Still unverified: the visual world has never been checked against a comp, because no
-comp exists. The layout is measured against the direction contract, not against pixels.
+Recorded here because the pattern matters more than the individual bugs:
+
+- **Every view rendered at once.** A `display: flex` rule beat the `hidden` attribute's
+  UA `display: none`. A DOM probe checking `el.hidden` reported the state as correct —
+  the property was right and the rendering was wrong. Only a screenshot found it.
+- A Fire's error reason clipped mid-word in the 180px spine.
+- Save and Verify wrapped under the field; the action column was too narrow.
+- The window label showed a Draft's window on the Setup board.
+- `favicon.ico` 404'd on every load.
 
 ## Detector: one advisory deliberately kept
 
 `impeccable detect` reports `repeating-stripes-gradient` on the hatch fill. That
-gradient is the gap itself — the single load-bearing idea in this direction. Suppressing
+gradient **is** the gap — the single load-bearing idea in this direction. Suppressing
 it would remove the feature. Kept intentionally.
 
-Contrast was the one finding that was a straight bug: `--carbon-faint` and
-`--signal-dim` measured 3.1:1 and 3.3:1. All text now clears WCAG AA, worst case
-5.07:1. The committed accessibility bar outranked the palette.
+Two findings were adjudicated rather than obeyed:
 
-The `side-tab` finding was adjudicated, not obeyed: a 3px status rule per card reads as
-the generic AI card pattern. Replaced with one continuous strip down the spine, which
-reads as a chart trace instead. `border-left: 3px` no longer appears anywhere.
+- **Contrast was a straight bug, and fixed over the aesthetic.** `--carbon-faint` and
+  `--signal-dim` measured 3.1:1 and 3.3:1. The committed AA bar outranked the palette.
+- **The `side-tab` finding was a false positive against this world.** Three accent tabs
+  *were* drifting toward the generic pattern, so they became one continuous strip down
+  the spine. `border-left: 3px` no longer appears anywhere.
+
+## Known gaps
+
+Not fixed, and recorded rather than assumed away:
+
+- **Repo discovery is unthrottled.** The hour-cache charting asked for was never
+  implemented, because the research showed it targeted the wrong cost.
+- **Slack channel discovery reads one channel.** ADR-0003's "discovered from activity"
+  holds for GitHub repos and not for Slack channels.
+- **No comp means no measured target.** The layout is audited against the direction
+  contract, not against pixels. The 180px spine was chosen by judgement and checked by
+  screenshot, not measured against a comp.

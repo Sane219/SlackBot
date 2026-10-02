@@ -14,7 +14,18 @@ Read `docs/adr/` first. **Where an ADR and `idea.md` disagree, the ADR wins** â€
 `idea.md` is the record of the original thinking, not current truth, and it carries
 a header mapping each reversal.
 
-The live design is worked as a wayfinding map at
+## Before touching the UI
+
+`DESIGN.md` is the visual system, written from the built CSS and verified token by
+token. Its named rules are load-bearing, not descriptive: **One Voice Rule** (amber on
+under 5% of a screen), **Vermilion Rule** (a failed Fire and nothing else), **One Size
+Rule** (a second font size is a system bug), **Flat-By-Default** (nothing lifts or
+glows), **AA Floor** (every ink clears 4.5:1 against its real ground).
+
+Run `impeccable detect` on changed UI files. One finding is deliberate and documented in
+`.impeccable/BLOCKER.md`: the hatch's repeating gradient *is* the gap.
+
+The live design was worked as a wayfinding map at
 [#1](https://github.com/Sane219/SlackBot/issues/1).
 
 ## Vocabulary

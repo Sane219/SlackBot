@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-02T13:05:00Z",
+  "title": "Design System: SlackBot",
+  "extensions": {
+    "colorMeta": {
+      "wall": {
+        "role": "neutral",
+        "displayName": "Wall",
+        "canonical": "#0a0b0d",
+        "tonalRamp": ["#0a0b0d", "#101216", "#14282c", "#1b3a3f"]
+      },
+      "carbon": {
+        "role": "neutral",
+        "displayName": "Carbon",
+        "canonical": "#e6eaef",
+        "tonalRamp": ["#7d868f", "#a8b1ba", "#e6eaef"]
+      },
+      "signal": {
+        "role": "primary",
+        "displayName": "Signal Amber",
+        "canonical": "#ffb020",
+        "tonalRamp": ["#c2830f", "#ffb020"]
+      },
+      "sev1": {
+        "role": "tertiary",
+        "displayName": "Alarm Vermilion",
+        "canonical": "#ff5f57",
+        "tonalRamp": ["#ff5f57"]
+      }
+    },
+    "typographyMeta": {
+      "body": {
+        "displayName": "Body",
+        "purpose": "Every readable string: Draft text, labels, timestamps, notes."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "The code column, tabs, classification codes and field captions. 0.78em, tracked 0.16em, uppercase. The 11px floor — no label goes smaller."
+      }
+    },
+    "shadows": [
+      {
+        "name": "failure-inset",
+        "value": "inset 0 0 0 1px #ff5f57",
+        "purpose": "A vermilion outline burned into a failure banner. The only shadow in the system; an alarm, not a lift."
+      }
+    ],
+    "motion": [],
+    "breakpoints": [
+      { "name": "stack", "value": "860px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Approve Button",
+      "kind": "button",
+      "refersTo": "button-approve",
+      "description": "The only control that reaches Slack. Always separated from Discard by a full rule.",
+      "html": "<button class=\"btn btn--approve\">Approve &amp; send</button>",
+      "css": ".btn { font-family: inherit; font-size: inherit; letter-spacing: 0.12em; text-transform: uppercase; padding: 0.6rem 1.4rem; border: 2px solid var(--grid); background: transparent; color: var(--carbon); cursor: pointer; } .btn--approve { border-color: var(--signal); color: var(--signal); font-weight: 700; } .btn--approve:hover { background: var(--signal); color: var(--wall); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Save, Verify, Regenerate, Discard. Never adjacent to Approve.",
+      "html": "<button class=\"btn btn--secondary\">Discard</button>",
+      "css": ".btn--secondary { color: var(--carbon-dim); } .btn--secondary:hover { color: var(--carbon); border-color: var(--carbon-dim); }"
+    },
+    {
+      "name": "Credential Field",
+      "kind": "input",
+      "description": "Secret input. Once stored the placeholder says so, so the field never implies it is empty.",
+      "html": "<input type=\"password\" placeholder=\"•••••••• stored\" aria-label=\"Slack token\" />",
+      "css": "input[type=\"text\"], input[type=\"password\"] { font-family: inherit; font-size: inherit; background: var(--wall); border: 1px solid var(--grid-soft); color: var(--carbon); padding: 0.55rem 0.7rem; width: 100%; max-width: 34rem; } input:focus-visible, textarea:focus-visible { border-color: var(--signal); } input::placeholder { color: var(--carbon-faint); }"
+    },
+    {
+      "name": "Draft Card",
+      "kind": "card",
+      "description": "One unapproved Post. Flat, 2px rule, no shadow. The gap variant says NO SIGNAL in words rather than tinting the box.",
+      "html": "<div class=\"draft-card\"><div class=\"draft-card__body\">Day Task:</div></div>",
+      "css": ".draft-card { border: 2px solid var(--grid); padding: 1.1rem 1.3rem; display: flex; flex-direction: column; gap: 0.9rem; background: var(--wall-raised); } .draft-card__body { white-space: pre-wrap; min-height: 3.5rem; } .draft-card--nosignal .draft-card__body { color: var(--signal-dim); letter-spacing: 0.16em; font-weight: 700; border-left: 2px solid var(--signal-dim); padding-left: 0.7rem; }"
+    },
+    {
+      "name": "Spine Row",
+      "kind": "custom",
+      "description": "One Fire in the timeline. The 3px strip carries status; the hatch carries a gap.",
+      "html": "<div class=\"fire fire--nosignal\"><span class=\"fire__rule\" aria-hidden=\"true\"></span><div class=\"fire__clock\">14:30</div><div class=\"fire__name\">Progress Update</div><div class=\"fire__code\">SYS</div><div class=\"hatch\" aria-hidden=\"true\"></div><span class=\"sr-only\">No signal. Nothing collected between 14:30 and 18:30.</span></div>",
+      "css": ".fire { position: relative; display: grid; grid-template-columns: 1fr; padding: 0.9rem 1rem 0.9rem 1.1rem; border-bottom: 1px solid var(--grid-soft); } .fire__rule { position: absolute; inset: 0 auto 0 0; width: 3px; background: transparent; } .fire--traced .fire__rule { background: var(--signal); } .fire--failed .fire__rule { background: var(--sev1); } .fire__clock { font-variant-numeric: tabular-nums; letter-spacing: 0.04em; color: var(--carbon-dim); } .fire__name { font-weight: 700; letter-spacing: 0.02em; color: var(--carbon); } .fire__code { font-size: 0.78em; letter-spacing: 0.16em; color: var(--carbon-faint); overflow-wrap: anywhere; line-height: 1.35; } .fire--failed .fire__code { color: var(--sev1); font-weight: 700; } .hatch { height: 3px; margin-top: 0.55rem; border-radius: 1px; background-image: repeating-linear-gradient(-45deg, var(--signal-dim) 0 2px, transparent 2px 5px); }"
+    },
+    {
+      "name": "Tab",
+      "kind": "nav",
+      "description": "Three views. Selected is amber text with a 2px amber underline. No hamburger, no drawer.",
+      "html": "<button class=\"tab\" role=\"tab\" aria-selected=\"true\">Inbox</button>",
+      "css": ".tabs { display: flex; gap: 1.25rem; border-bottom: 1px solid var(--grid-soft); } .tab { font-family: inherit; font-size: 0.78em; letter-spacing: 0.16em; text-transform: uppercase; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--carbon-faint); padding: 0 0 0.5rem; cursor: pointer; } .tab[aria-selected=\"true\"] { color: var(--signal); border-bottom-color: var(--signal); }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Operations Board",
+    "overview": "The instrument you read to know what a system did overnight. A board that could shout would be a board you could no longer trust, so this one takes up no attention at all: one type size, no radius except a single pixel on a hatch, no shadow except one inset alarm, and one amber mark whose rarity is the entire reason it is legible. Restraint is the mechanism here, not the mood.\n\nA drawn gap means more than a filled one. When a window collected nothing, the surface shows a hatched void with the window's span printed across it, reading NO SIGNAL. That single gesture is the system's whole argument: a tool that cannot distinguish nothing happened from we did not look is a tool whose confident drafts mean nothing.",
+    "keyCharacteristics": [
+      "One type size. Rank comes from weight, case, and rule — never a second size.",
+      "One amber, used on less than 5% of any screen. Its scarcity is the point.",
+      "Vermilion appears exactly once in the system: SEV1, a Fire that failed.",
+      "Depth is a rule and a slightly lighter ground, never a lift.",
+      "A gap is drawn as a gap."
+    ],
+    "rules": [
+      "The One Voice Rule. Signal Amber is used on less than 5% of any screen.",
+      "The Vermilion Rule. Reserved for a failed Fire, and nothing else.",
+      "The AA Floor Rule. Every ink token clears 4.5:1 against its actual ground.",
+      "The One Size Rule. A second font size is a system bug.",
+      "The 11px Floor. Labels shrink to 0.78em and no further.",
+      "The Flat-By-Default Rule. Nothing rises, nothing glows, nothing has a drop shadow."
+    ],
+    "antiReferences": [
+      "Near-black surfaces with a neon accent and glowing edges.",
+      "Card grids with pills, rounded corners and status chips.",
+      "Generated-dashboard tells: side-tab accent borders, decorative gradients, backdrop blur.",
+      "An optimistic surface that hides its gaps."
+    ]
+  }
+}
