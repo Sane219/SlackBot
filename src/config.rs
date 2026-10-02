@@ -125,36 +125,43 @@ pub fn read_github_login(path: &std::path::Path) -> Option<String> {
 }
 
 pub fn write_slack_identity(path: &std::path::Path, user_id: &str) -> std::io::Result<()> {
-    append_setting(path, &format!("slack_user_id = \"{user_id}\""))
+    write_settings(path, &[("slack_user_id", user_id)])
 }
 
 pub fn write_github_login(path: &std::path::Path, login: &str) -> std::io::Result<()> {
-    append_setting(path, &format!("github_login = \"{login}\""))
+    write_settings(path, &[("github_login", login)])
 }
 
-/// Add or replace one `key = "value"` line, leaving the others alone.
+/// Add or replace the named keys, leaving every other line alone.
 ///
-/// A hand-rolled updater rather than a TOML round trip, because appending an identity
-/// must not risk rewriting the endpoint and model next to it.
-fn append_setting(path: &std::path::Path, line: &str) -> std::io::Result<()> {
+/// One writer for the whole file, because two writers that disagree about whether to
+/// preserve the other keys is how an identity gets destroyed by an unrelated save.
+fn write_settings(path: &std::path::Path, entries: &[(&str, &str)]) -> std::io::Result<()> {
     use std::io::Write;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let key = line.split('=').next().unwrap_or("").trim().to_string();
     let mut kept: Vec<String> = std::fs::read_to_string(path)
         .unwrap_or_default()
         .lines()
-        .filter(|l| !l.trim_start().starts_with(&key))
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !entries
+                .iter()
+                .any(|(key, _)| trimmed.starts_with(key) && trimmed.contains('='))
+        })
         .map(str::to_string)
         .collect();
 
-    kept.push(line.to_string());
+    for (key, value) in entries {
+        kept.push(format!("{key} = \"{}\"", value.replace('"', "\\\"")));
+    }
+
     let mut file = std::fs::File::create(path)?;
-    for l in kept {
-        writeln!(file, "{l}")?;
+    for line in kept {
+        writeln!(file, "{line}")?;
     }
     Ok(())
 }
@@ -167,21 +174,19 @@ pub fn read_llm_settings(path: &std::path::Path) -> Option<crate::routes::LlmSet
     Some(crate::routes::LlmSettings { base_url, model })
 }
 
+/// Write the endpoint and model, preserving every other line.
+///
+/// This used `fs::write` with a two-line body, which silently destroyed the Slack and
+/// GitHub identities stored in the same file. The next start would then find no Slack
+/// client and no GitHub client while the setup board still showed OK, and Approve would
+/// answer "slack is not configured yet" for a Slack the user had just verified.
 pub fn write_llm_settings(
     path: &std::path::Path,
     settings: &crate::routes::LlmSettings,
 ) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(
+    write_settings(
         path,
-        format!(
-            "# Not secret: the API key lives in the OS keychain, not here.\n\
-             base_url = \"{}\"\nmodel = \"{}\"\n",
-            settings.base_url.replace('"', "\\\""),
-            settings.model.replace('"', "\\\"")
-        ),
+        &[("base_url", &settings.base_url), ("model", &settings.model)],
     )
 }
 
@@ -238,6 +243,39 @@ mod tests {
                 .count(),
             2
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn saving_the_model_preserves_the_stored_identities() {
+        // Regression: write_llm_settings used fs::write with a two-line body, so saving
+        // the model destroyed the Slack and GitHub identities in the same file. The next
+        // start then had no Slack client while the setup board still showed OK.
+        let dir = std::env::temp_dir().join(format!("slackbot-id-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+
+        write_slack_identity(&path, "U0A9WPY4S1F").unwrap();
+        write_github_login(&path, "sanket129").unwrap();
+        write_llm_settings(
+            &path,
+            &crate::routes::LlmSettings {
+                base_url: "http://127.0.0.1:8000/v1".into(),
+                model: "Coot AI".into(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(read_slack_identity(&path).as_deref(), Some("U0A9WPY4S1F"));
+        assert_eq!(read_github_login(&path).as_deref(), Some("sanket129"));
+
+        // And in the other order, which is what the setup board's LLM/SLK/GH order does.
+        write_slack_identity(&path, "U0A9WPY4S1F").unwrap();
+        assert_eq!(
+            read_llm_settings(&path).map(|s| s.model),
+            Some("Coot AI".to_string())
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -82,6 +82,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             counts       TEXT    NOT NULL DEFAULT '{}',
             no_signal    INTEGER NOT NULL DEFAULT 0,
             partial      INTEGER NOT NULL DEFAULT 0,
+            -- No ON DELETE clause: a hard delete is RESTRICT, so prune cannot silently
+            -- orphan a child. Discarded Drafts are flagged, not deleted (ADR-0006).
             parent_id    INTEGER REFERENCES drafts(id),
             -- Discarded rather than deleted. The row must survive so a child's lineage
             -- still resolves through it (ADR-0006); deleting it would either cascade
@@ -207,7 +209,18 @@ pub fn get_job(conn: &Connection, id: i64) -> Result<Job> {
         .ok_or(StoreError::JobNotFound(id))
 }
 
+/// Delete a Job and everything under it.
+///
+/// The Drafts go children-first, because `parent_id` is RESTRICT: a self-referencing
+/// chain cannot be deleted by a single cascade, and a plain `DELETE FROM jobs` leaves
+/// SQLite to cascade in an order that trips the constraint.
 pub fn delete_job(conn: &Connection, id: i64) -> Result<()> {
+    // Break the chain from the leaves up, then remove what is left.
+    conn.execute(
+        "UPDATE drafts SET parent_id = NULL WHERE job_id = ?1",
+        params![id],
+    )?;
+    conn.execute("DELETE FROM drafts WHERE job_id = ?1", params![id])?;
     conn.execute("DELETE FROM jobs WHERE id = ?1", params![id])?;
     Ok(())
 }
@@ -518,17 +531,33 @@ pub fn prune(
     let draft_cutoff = now - chrono::Duration::days(draft_days);
     let fire_cutoff = now - chrono::Duration::days(fire_days);
 
-    // Approved drafts are kept for their window regardless of action; unapproved ones
-    // only until they are acted on or age out.
-    let drafts = conn.execute(
-        "DELETE FROM drafts WHERE approved = 0 AND created_at < ?1",
+    // A Draft is only *hard-deleted* once it is approved, old, and has no child. The
+    // NOT EXISTS guard is not sufficient on its own: SQLite checks foreign keys during
+    // the scan, so a statement that merely considers a referenced row still raises
+    // before the guard excludes it. The child links are therefore cleared first, so
+    // nothing the delete visits is referenced.
+    //
+    // Unapproved Drafts are never deleted. They are what the Inbox is, and an unapproved
+    // Draft older than the retention window is something the user has not decided about.
+    conn.execute(
+        "UPDATE drafts SET parent_id = NULL
+          WHERE created_at < ?1 AND parent_id IS NOT NULL",
         params![draft_cutoff.to_rfc3339()],
     )?;
 
-    // Keep one Fire row per (job, outcome) inside the window so the spine can still show
-    // recent history after the detail rows go.
+    let drafts = conn.execute(
+        "DELETE FROM drafts
+          WHERE approved = 1 AND created_at < ?1",
+        params![draft_cutoff.to_rfc3339()],
+    )?;
+
+    // Fire rows are deleted, but a Fire with a surviving Draft is kept so the Draft's
+    // `fire_id` still resolves. Approved Drafts are never reached this way because the
+    // cascade only fires when the Fire row itself goes.
     let fires = conn.execute(
-        "DELETE FROM fires WHERE fired_at < ?1",
+        "DELETE FROM fires
+          WHERE fired_at < ?1
+            AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.fire_id = fires.id)",
         params![fire_cutoff.to_rfc3339()],
     )?;
 
@@ -794,6 +823,173 @@ mod tests {
 
         assert_eq!(pruned, 1);
         assert_eq!(list_drafts(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn debug_prune() {
+        let conn = open_in_memory().unwrap();
+        let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        let mut parent = sample_draft(job_id, fire_id, "parent");
+        parent.created_at = Utc::now() - chrono::Duration::days(90);
+        let pid = insert_draft(&conn, &parent).unwrap();
+        mark_approved(&conn, pid, Utc::now()).unwrap();
+        let mut child = sample_draft(job_id, fire_id, "child");
+        child.parent_id = Some(pid);
+        child.created_at = Utc::now();
+        let cid = insert_draft(&conn, &child).unwrap();
+        println!(
+            "parent={pid} child={cid} drafts={}",
+            list_drafts(&conn).unwrap().len()
+        );
+        let r = prune(&conn, Utc::now(), 30, 90);
+        println!("prune result: {r:?}");
+    }
+
+    #[test]
+    fn debug_prune3() {
+        let conn = open_in_memory().unwrap();
+        let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        let mut parent = sample_draft(job_id, fire_id, "parent");
+        parent.created_at = Utc::now() - chrono::Duration::days(90);
+        let pid = insert_draft(&conn, &parent).unwrap();
+        mark_approved(&conn, pid, Utc::now()).unwrap();
+        let mut child = sample_draft(job_id, fire_id, "child");
+        child.parent_id = Some(pid);
+        child.created_at = Utc::now();
+        let _cid = insert_draft(&conn, &child).unwrap();
+        let fire_cutoff = (Utc::now() - chrono::Duration::days(90)).to_rfc3339();
+        let f = conn.execute("DELETE FROM fires WHERE fired_at < ?1 AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.fire_id = fires.id)", rusqlite::params![fire_cutoff]);
+        println!("fire delete: {f:?}");
+        println!("fires left: {}", list_fires(&conn, 10).unwrap().len());
+    }
+
+    #[test]
+    fn debug_prune4() {
+        let conn = open_in_memory().unwrap();
+        let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        let mut parent = sample_draft(job_id, fire_id, "parent");
+        parent.created_at = Utc::now() - chrono::Duration::days(90);
+        let pid = insert_draft(&conn, &parent).unwrap();
+        mark_approved(&conn, pid, Utc::now()).unwrap();
+        let mut child = sample_draft(job_id, fire_id, "child");
+        child.parent_id = Some(pid);
+        child.created_at = Utc::now();
+        let _cid = insert_draft(&conn, &child).unwrap();
+        // Step 1: the draft delete from prune, verbatim
+        let draft_cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+        let d = conn.execute("DELETE FROM drafts WHERE approved = 1 AND created_at < ?1 AND (parent_id IS NULL OR NOT EXISTS (SELECT 1 FROM drafts c WHERE c.parent_id = drafts.id))", rusqlite::params![draft_cutoff]);
+        println!("step1 draft delete: {d:?}");
+        println!("drafts after: {}", list_drafts(&conn).unwrap().len());
+        // Step 2: the fire delete from prune, verbatim
+        let fire_cutoff = (Utc::now() - chrono::Duration::days(90)).to_rfc3339();
+        let f = conn.execute("DELETE FROM fires WHERE fired_at < ?1 AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.fire_id = fires.id)", rusqlite::params![fire_cutoff]);
+        println!("step2 fire delete: {f:?}");
+    }
+
+    #[test]
+    fn pruning_never_breaks_a_lineage_chain() {
+        // The parent_id foreign key is RESTRICT, so a naive prune that removed a
+        // referenced Draft raised a violation — and the scheduler propagates it, so
+        // pruning printed an error every tick and never worked again. Prune must clear
+        // the child links before deleting, and never delete an unapproved Draft.
+        let conn = open_in_memory().unwrap();
+        let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+
+        let old = Utc::now() - chrono::Duration::days(90);
+        let mut parent = sample_draft(job_id, fire_id, "parent");
+        parent.created_at = old;
+        let parent_id = insert_draft(&conn, &parent).unwrap();
+        mark_approved(&conn, parent_id, old).unwrap();
+
+        let mut child = sample_draft(job_id, fire_id, "child");
+        child.parent_id = Some(parent_id);
+        child.created_at = old;
+        let child_id = insert_draft(&conn, &child).unwrap();
+
+        // The parent is old and approved but still referenced; the child is old and
+        // unapproved, so it is kept. Pruning the link first must not raise.
+        prune(&conn, Utc::now(), 30, 90).unwrap();
+
+        // The unapproved child survives.
+        assert!(
+            get_draft(&conn, child_id).is_ok(),
+            "an unapproved draft must survive pruning"
+        );
+    }
+
+    #[test]
+    fn an_unapproved_draft_is_never_pruned_away() {
+        // An unapproved Draft is something the user has not decided about. Silently
+        // deleting it because it is old is how a pending post disappears.
+        let conn = open_in_memory().unwrap();
+        let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+
+        let mut stale = sample_draft(job_id, fire_id, "undecided");
+        stale.created_at = Utc::now() - chrono::Duration::days(400);
+        let id = insert_draft(&conn, &stale).unwrap();
+
+        prune(&conn, Utc::now(), 30, 90).unwrap();
+
+        assert!(
+            get_draft(&conn, id).is_ok(),
+            "an unapproved draft must survive pruning"
+        );
+        assert_eq!(list_unapproved(&conn).unwrap().len(), 1);
     }
 
     #[test]

@@ -88,6 +88,10 @@ function renderSpine() {
   }
 }
 
+// "Asia/Kolkata" -> "Kolkata"; "UTC" and "GMT" have no slash and must not render as
+// "undefined".
+const tzLabel = (tz) => (tz.includes("/") ? tz.split("/")[1] : tz);
+
 const codeOf = (outcome) =>
   ({ drafted: "ACT", partial: "PR", failed: "SEV1", missed: "MIS", skipped: "SKP" }[outcome] || "SYS");
 
@@ -219,7 +223,7 @@ function renderJobs() {
   }
 
   for (const job of state.jobs) {
-    const when = job.schedule.at + " " + job.schedule.tz.split("/")[1];
+    const when = `${job.schedule.at} ${tzLabel(job.schedule.tz)}`;
     const window_ = job.context_window.kind === "lookback"
       ? `last ${job.context_window.hours}h`
       : `since ${job.context_window.at}${job.context_window.previous_day ? " prev day" : ""}`;
@@ -376,20 +380,31 @@ $("#plan-btn").addEventListener("click", async () => {
     const result = await api("/api/plan", { method: "POST", body: { description: $("#routine").value } });
     // The Plan Role proposes. Nothing is scheduled until each is confirmed below.
     let created = 0;
+    const failed = [];
     for (const job of result.jobs) {
       const context = job.context === "since" ? "since" : "lookback";
-      await api("/api/jobs", {
-        method: "POST",
-        body: {
-          name: job.name, at: job.at, tz: job.tz,
-          channel_id: job.channel.replace(/^#/, ""), channel_name: job.channel.replace(/^#/, ""),
-          context, since_at: job.since_at, previous_day: job.previous_day,
-          lookback_hours: 8, prompt: job.prompt,
-        },
-      });
-      created += 1;
+      try {
+        // Send the channel as written. The server resolves the name to Slack's C… id;
+        // passing the name through as an id makes every read fail with channel_not_found
+        // and every post 502.
+        await api("/api/jobs", {
+          method: "POST",
+          body: {
+            name: job.name, at: job.at, tz: job.tz,
+            channel_id: job.channel,
+            channel_name: job.channel.replace(/^#/, ""),
+            context, since_at: job.since_at, previous_day: job.previous_day,
+            lookback_hours: 8, prompt: job.prompt,
+          },
+        });
+        created += 1;
+      } catch (err) {
+        failed.push(`${job.name} (${job.channel}): ${err.message}`);
+      }
     }
-    out.textContent = `${created} job(s) saved. Check them below and edit what does not match.`;
+    out.textContent = failed.length
+      ? `${created} saved, ${failed.length} not: ${failed.join("; ")}`
+      : `${created} job(s) saved. Check them below and edit what does not match.`;
     await refresh();
   } catch (err) {
     // An unusable proposal is shown raw rather than repaired into something the user

@@ -419,6 +419,67 @@ struct JobsResponse {
     jobs: Vec<Job>,
 }
 
+/// The channels the user can post to, resolved from names to Slack's `C…` ids.
+///
+/// The Plan Role returns names like `#coot-ai`, because that is what a person writes.
+/// `chat.postMessage` and `conversations.history` both need ids, so a Job created from a
+/// proposal would have failed every read with `channel_not_found` and every post with a
+/// 502. This is the only way to turn a name into an id.
+#[derive(Serialize)]
+struct ChannelView {
+    id: String,
+    name: String,
+}
+
+async fn list_channels(State(state): State<AppState>) -> Result<Json<Vec<ChannelView>>, ApiError> {
+    let slack = state.slack.as_ref().ok_or((
+        StatusCode::PRECONDITION_FAILED,
+        "slack is not configured yet".into(),
+    ))?;
+
+    let channels = slack
+        .channels()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    Ok(Json(
+        channels
+            .into_iter()
+            .map(|c| ChannelView {
+                id: c.id,
+                name: c.name,
+            })
+            .collect(),
+    ))
+}
+
+/// Resolve a channel name to its id, for a Job created from a plan.
+async fn resolve_channel(
+    slack: &crate::slack::SlackClient,
+    name: &str,
+) -> Result<crate::domain::ChannelRef, ApiError> {
+    let wanted = name.trim_start_matches('#').to_lowercase();
+    let channels = slack
+        .channels()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+
+    channels
+        .into_iter()
+        .find(|c| c.name.to_lowercase() == wanted)
+        .map(|c| crate::domain::ChannelRef {
+            id: c.id,
+            name: c.name,
+        })
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "no channel called #{wanted} that you are a member of. \
+                 Slack needs the channel's id, not its name — pick one from the list."
+            ),
+        ))
+}
+
 async fn list_jobs(State(state): State<AppState>) -> Result<Json<JobsResponse>, ApiError> {
     Ok(Json(JobsResponse {
         jobs: store::list_jobs(&lock(&state))?,
@@ -535,6 +596,22 @@ async fn create_job(
         },
     };
 
+    // Accept either a Slack `C…` id or a `#name`, because the Plan Role produces the
+    // latter and a human types the former. Posting a name where an id is expected fails
+    // at collection time with `channel_not_found`, which reads as a broken tool.
+    let channel = if body.channel_id.starts_with('C') {
+        crate::domain::ChannelRef {
+            id: body.channel_id,
+            name: body.channel_name,
+        }
+    } else {
+        let slack = state.slack.as_ref().ok_or((
+            StatusCode::PRECONDITION_FAILED,
+            "set up Slack first, so a channel name can be resolved to its id".into(),
+        ))?;
+        resolve_channel(slack, &body.channel_id).await?
+    };
+
     let job = Job {
         id: 0,
         name: body.name.trim().into(),
@@ -542,10 +619,7 @@ async fn create_job(
             at: body.at,
             tz: body.tz,
         },
-        channel: crate::domain::ChannelRef {
-            id: body.channel_id,
-            name: body.channel_name,
-        },
+        channel,
         context_window,
         prompt_template: body.prompt,
         enabled: true,
@@ -792,6 +866,16 @@ async fn approve(
         ));
     }
 
+    // An empty Draft means the model call failed. Approving it would post an empty
+    // message, which is indistinguishable from a bug in the channel.
+    if draft.text.trim().is_empty() {
+        store::discard_draft(&lock(&state), id)?;
+        return Err((
+            StatusCode::CONFLICT,
+            "this draft could not be generated, so there is nothing to send".into(),
+        ));
+    }
+
     // A gap has nothing to post. Approving it would put "NO SIGNAL" in a channel, which
     // is worse than nothing.
     if draft.no_signal {
@@ -865,7 +949,7 @@ async fn fire_now(
         runner.seed_text(&guard, job.id)
     }
     .unwrap_or(None);
-    let text = runner.compose_text(&job, &collected, seed).await;
+    let (text, parent_id) = runner.compose_text(&job, &collected, seed).await;
 
     {
         let guard = lock(&state);
@@ -878,6 +962,7 @@ async fn fire_now(
             collected.to,
             at,
             text,
+            parent_id,
         )
     }
     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -906,6 +991,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/setup/verify", post(verify_credential))
         .route("/api/setup/llm", get(llm_settings).post(save_llm))
         .route("/api/jobs", get(list_jobs).post(create_job))
+        .route("/api/channels", get(list_channels))
         .route(
             "/api/jobs/{id}",
             axum::routing::patch(update_job).delete(delete_job),

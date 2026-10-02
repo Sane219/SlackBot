@@ -180,7 +180,7 @@ impl FireRunner {
             return Ok(None);
         };
 
-        let text = self.compose_text(job, &collected, seed).await;
+        let (text, parent_id) = self.compose_text(job, &collected, seed).await;
 
         let fire = {
             let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -193,6 +193,7 @@ impl FireRunner {
                 collected.to,
                 at,
                 text,
+                parent_id,
             )?;
             store::get_fire(&guard, fire_id).map_err(|e| e.to_string())?
         };
@@ -262,42 +263,61 @@ impl FireRunner {
         .map_err(|e| e.to_string())
     }
 
-    /// Compose the Draft's text. Async and lock-free: the model call happens here, then
-    /// the caller writes the result in one short step.
+    /// Compose the Draft's text, and the parent it was seeded from. Async and lock-free:
+    /// the model call happens here, then the caller writes in one short step.
     pub async fn compose_text(
         &self,
         job: &Job,
         collected: &Collected,
-        seed: Option<String>,
-    ) -> String {
+        seed: Option<(i64, String)>,
+    ) -> (String, Option<i64>) {
         // A Fire that collected nothing never calls the model: the gap marker is a
-        // decision, not a prompt.
+        // decision, not a prompt. It still records its lineage, so a chain stays whole.
         if collected.rendered.no_signal {
-            return NO_SIGNAL_TEXT.to_string();
+            return (NO_SIGNAL_TEXT.to_string(), seed.as_ref().map(|(id, _)| *id));
         }
 
-        self.llm
-            .draft(job, &collected.rendered.text, seed.as_deref())
+        let parent_id = seed.as_ref().map(|(id, _)| *id);
+        let seed_text = seed.map(|(_, text)| text);
+
+        // A model failure is not a Draft. Writing the error into the Draft body produced
+        // an approvable message reading "DRAFT FAILED: error sending request for
+        // http://127.0.0.1:0/...", which a user could post to their team channel.
+        // ADR-0001 is about what reaches Slack, and a failure notice is not something a
+        // human chose to send.
+        match self
+            .llm
+            .draft(job, &collected.rendered.text, seed_text.as_deref())
             .await
-            .unwrap_or_else(|err| format!("DRAFT FAILED: {err}"))
+        {
+            Ok(text) => (text, parent_id),
+            Err(err) => {
+                eprintln!("draft for job {} failed: {err}", job.name);
+                (String::new(), parent_id)
+            }
+        }
     }
 
-    /// The seed text for a Draft: the previous cycle's Draft, or none.
+    /// The seed for a Draft: the previous cycle's Draft id and text, or none.
     ///
-    /// Synchronous so the caller can read it before releasing the lock for the model call.
+    /// Prefers the last **edited** text, per ADR-0006: a user who rewrote yesterday's
+    /// summary has already decided what matters, and re-deriving from raw evidence would
+    /// discard that judgement. Synchronous, so the caller can read it before releasing the
+    /// lock for the model call.
     pub fn seed_text(
         &self,
         conn: &rusqlite::Connection,
         job_id: i64,
-    ) -> Result<Option<String>, String> {
+    ) -> Result<Option<(i64, String)>, String> {
         let parent = self.latest_draft_for(conn, job_id)?;
         // A gap marker is never a useful seed: seeding from "NO SIGNAL" would hand the
-        // model an empty previous message to continue.
+        // model an empty previous message to continue. The id still comes back so the
+        // chain stays whole even when there is nothing to continue.
         Ok(match parent {
             Some(id) => store::get_draft(conn, id)
                 .ok()
-                .map(|d| d.text)
-                .filter(|t| t != NO_SIGNAL_TEXT),
+                .map(|d| (id, d.text))
+                .filter(|(_, text)| text != NO_SIGNAL_TEXT && !text.trim().is_empty()),
             None => None,
         })
     }
@@ -315,6 +335,7 @@ impl FireRunner {
         to: DateTime<Utc>,
         at: DateTime<Utc>,
         text: String,
+        parent_id: Option<i64>,
     ) -> Result<(), String> {
         // A Fire that collected nothing still gets a Draft, carrying the gap marker. The
         // text arrives already composed so no model call happens under the lock.
@@ -334,7 +355,9 @@ impl FireRunner {
             counts: rendered.counts,
             no_signal: rendered.no_signal,
             partial: rendered.partial,
-            parent_id: None,
+            // The lineage ADR-0006 exists for. Without it, a chain of three posts has no
+            // recorded relationship and cannot be explained to the user.
+            parent_id,
             created_at: at,
             edited: false,
             approved: false,
@@ -482,30 +505,33 @@ pub fn mark_missed(conn: &rusqlite::Connection, at: DateTime<Utc>) -> Result<usi
             continue;
         };
 
-        // Count how many due times passed between the last Fire and now.
+        // Collect every due time that passed, not just the last one. The previous
+        // version counted them and then reused the final `cursor` for each row, so three
+        // missed posts left one gap — and the (job, tick) index accepted exactly one of
+        // the identical rows anyway. ADR-0007 promises one row per Fire.
+        let mut due_times: Vec<DateTime<Utc>> = Vec::new();
         let mut cursor = last;
-        let mut missed = 0;
         while let Some(next) = job.schedule.next_after(cursor) {
             if next > at {
                 break;
             }
+            due_times.push(next);
             cursor = next;
-            missed += 1;
-            if missed > 64 {
+            if due_times.len() > 64 {
                 // A machine that was off for weeks. Cap it; the count is informational.
                 break;
             }
         }
 
-        for _ in 0..missed {
+        for due in due_times {
             if store::record_fire(
                 conn,
                 job.id,
-                cursor,
+                due,
                 FireOutcome::Missed,
                 true,
                 Some("the app was not running at this time"),
-                tick_key(cursor),
+                tick_key(due),
             )
             .map_err(|e| e.to_string())?
             .is_some()
@@ -791,8 +817,11 @@ mod tests {
         let later = Utc.with_ymd_and_hms(2026, 10, 3, 12, 0, 0).unwrap();
         let marked = mark_missed(&c(&conn), later).unwrap();
 
-        // Missed, recorded, and NOT retro-fired: no Draft was created.
-        assert!(marked > 0);
+        // One row per missed post, not one row for the lot. The previous version
+        // counted the due times and then wrote every row with the same `fired_at` and
+        // `tick`, so the (job, tick) index accepted exactly one and three missed posts
+        // left a single gap.
+        assert!(marked >= 2, "expected a row per missed post, got {marked}");
         let fires = store::list_fires(&c(&conn), 50).unwrap();
         assert!(fires.iter().any(|f| f.outcome == FireOutcome::Missed));
         assert!(store::list_unapproved(&c(&conn)).unwrap().is_empty());
@@ -815,7 +844,7 @@ mod tests {
         // on `next_after(at) <= at`, and `next_after` returns strictly after `at`, so the
         // condition was never true and no Job could ever fire.
         let conn = db();
-        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+        store::insert_job(&c(&conn), &job("Day Task")).unwrap();
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -841,19 +870,19 @@ mod tests {
         let at = Utc.with_ymd_and_hms(2026, 10, 2, 4, 5, 0).unwrap();
         tick(&runner, &conn, at).await.unwrap();
 
-        let fires = store::list_fires(&*c(&conn), 10).unwrap();
+        let fires = store::list_fires(&c(&conn), 10).unwrap();
         assert_eq!(
             fires.len(),
             1,
             "a Job five minutes past its slot must fire; nothing else creates a Fire"
         );
-        assert_eq!(store::list_unapproved(&*c(&conn)).unwrap().len(), 1);
+        assert_eq!(store::list_unapproved(&c(&conn)).unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn a_job_is_not_fired_before_its_slot() {
         let conn = db();
-        store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+        store::insert_job(&c(&conn), &job("Day Task")).unwrap();
 
         let server = MockServer::start().await;
         let runner = FireRunner {
@@ -869,7 +898,7 @@ mod tests {
         tick(&runner, &conn, at).await.unwrap();
 
         assert!(
-            store::list_fires(&*c(&conn), 10).unwrap().is_empty(),
+            store::list_fires(&c(&conn), 10).unwrap().is_empty(),
             "a Job must not fire an hour before its slot"
         );
     }
@@ -877,7 +906,7 @@ mod tests {
     #[tokio::test]
     async fn a_job_does_not_refire_within_the_same_tick() {
         let conn = db();
-        store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+        store::insert_job(&c(&conn), &job("Day Task")).unwrap();
 
         let server = MockServer::start().await;
         let runner = FireRunner {
@@ -896,7 +925,65 @@ mod tests {
 
         // The (job, tick) index keys on the due moment, not the tick time, so the second
         // tick resolves to the same due moment and is refused.
-        assert_eq!(store::list_fires(&*c(&conn), 10).unwrap().len(), 1);
+        assert_eq!(store::list_fires(&c(&conn), 10).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_draft_records_the_draft_it_was_seeded_from() {
+        // ADR-0006's stated reason for the field: without lineage a chain of three posts
+        // has no recorded relationship and cannot be explained to the user. The previous
+        // version hard-coded parent_id to None, so nearest_ancestor was dead code.
+        let conn = db();
+        let job_id = store::insert_job(&c(&conn), &job("Day Task")).unwrap();
+        let job = store::get_job(&c(&conn), job_id).unwrap();
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "Day Task: first"}}]
+            })))
+            .mount(&server)
+            .await;
+
+        let runner = FireRunner {
+            source: Arc::new(FixedSource {
+                activity: vec![Activity::Slack {
+                    channel: "coot-ai".into(),
+                    message: slack_message(),
+                }],
+                fail_with: None,
+            }),
+            llm: Arc::new(llm(&server)),
+        };
+
+        let day1 = Utc.with_ymd_and_hms(2026, 10, 2, 4, 5, 0).unwrap();
+        runner.fire(&conn, &job, day1).await.unwrap().unwrap();
+        let first = store::list_unapproved(&c(&conn)).unwrap()[0].id;
+        assert_eq!(
+            store::get_draft(&c(&conn), first).unwrap().parent_id,
+            None,
+            "the first draft has no parent"
+        );
+
+        // A second Fire a day later must point back at the first.
+        let day2 = Utc.with_ymd_and_hms(2026, 10, 3, 4, 5, 0).unwrap();
+        runner.fire(&conn, &job, day2).await.unwrap().unwrap();
+        let second = store::list_unapproved(&c(&conn))
+            .unwrap()
+            .into_iter()
+            .find(|d| d.id != first)
+            .expect("a second draft");
+
+        assert_eq!(
+            second.parent_id,
+            Some(first),
+            "the second draft must record what seeded it"
+        );
+        assert_eq!(
+            store::nearest_ancestor(&c(&conn), second.id).unwrap(),
+            Some(first)
+        );
     }
 
     #[tokio::test]
