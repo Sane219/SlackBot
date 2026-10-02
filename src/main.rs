@@ -1,5 +1,6 @@
 mod config;
 mod domain;
+mod evidence;
 mod github;
 mod slack;
 mod secrets;
