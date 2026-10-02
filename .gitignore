@@ -18,5 +18,12 @@ Cargo.lock.orig
 *.db-wal
 /slackbot-data/
 
+# Impeccable working artifacts. config.json is committed (it records the build path);
+# build output, review captures and mocks are local.
+.impeccable/build/
+.impeccable/review/
+.impeccable/mocks/
+.impeccable/config.local.json
+
 # macOS
 .DS_Store
