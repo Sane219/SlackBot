@@ -16,7 +16,7 @@ Cargo.lock.orig
 *.db
 *.db-shm
 *.db-wal
-/skillsbot-data/
+/slackbot-data/
 
 # macOS
 .DS_Store
