@@ -27,6 +27,7 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(20);
 /// and the binary needs nothing beside it.
 const INDEX_HTML: &str = include_str!("web/index.html");
 const APP_CSS: &str = include_str!("web/app.css");
+const APP_JS: &str = include_str!("web/app.js");
 
 fn assets() -> axum::Router {
     use axum::{http::header, response::IntoResponse, routing::get};
@@ -36,6 +37,9 @@ fn assets() -> axum::Router {
         }))
         .route("/app.css", get(|| async {
             ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], APP_CSS)
+        }))
+        .route("/app.js", get(|| async {
+            ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS)
         }))
 }
 

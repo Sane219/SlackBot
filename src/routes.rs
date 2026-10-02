@@ -396,9 +396,16 @@ struct CreateJob {
     channel_id: String,
     channel_name: String,
     context: String,
+    // Every optional field defaults. A client that sends only what it means to set is the
+    // normal case, and requiring `previous_day: false` to be spelled out would turn a
+    // partial body into a 422 before any of the real validation ran.
+    #[serde(default)]
     since_at: Option<String>,
+    #[serde(default)]
     previous_day: bool,
+    #[serde(default)]
     lookback_hours: Option<i64>,
+    #[serde(default)]
     prompt: String,
 }
 

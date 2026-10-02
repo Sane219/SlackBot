@@ -412,3 +412,132 @@ input::placeholder {
     animation: none !important;
   }
 }
+/* ── Tabs ────────────────────────────────────────────────────────────────── */
+
+.tabs {
+  display: flex;
+  gap: 1.25rem;
+  border-bottom: var(--rule);
+}
+
+.tab {
+  font-family: inherit;
+  font-size: 0.78em;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--carbon-faint);
+  padding: 0 0 0.5rem;
+  cursor: pointer;
+}
+
+.tab[aria-selected="true"] {
+  color: var(--signal);
+  border-bottom-color: var(--signal);
+}
+
+.view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-height: 0;
+}
+
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+  background: var(--wall);
+  border: var(--rule);
+  color: var(--carbon);
+  padding: 0.7rem 0.8rem;
+  width: 100%;
+  max-width: 44rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+textarea:focus-visible,
+input:focus-visible {
+  border-color: var(--signal);
+}
+
+.plan {
+  border: var(--rule);
+  border-left: 2px solid var(--grid);
+  padding: 1.1rem 1.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.prose {
+  white-space: pre-wrap;
+}
+
+/* ── A Draft in the Inbox ────────────────────────────────────────────────── */
+
+.draft-card {
+  border: var(--rule-strong);
+  padding: 1.1rem 1.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  background: var(--wall-raised);
+}
+
+.draft-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: var(--rule);
+  padding-bottom: 0.55rem;
+}
+
+.draft-card__name {
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.draft-card__body {
+  white-space: pre-wrap;
+  min-height: 3.5rem;
+}
+
+/* The gap is stated in words, not by tinting the box. */
+.draft-card--nosignal .draft-card__body {
+  color: var(--signal-dim);
+  letter-spacing: 0.16em;
+  font-weight: 700;
+  border-left: 2px solid var(--signal-dim);
+  padding-left: 0.7rem;
+}
+
+.counts {
+  display: flex;
+  gap: 1.2rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.empty {
+  color: var(--carbon-faint);
+  letter-spacing: 0.04em;
+  border: var(--rule);
+  border-left: 2px solid var(--grid);
+  padding: 1.2rem 1.3rem;
+}
+
+.step__row {
+  display: grid;
+  grid-template-columns: 7rem 1fr auto;
+  gap: 1rem;
+  align-items: start;
+}
+
+.step__note a {
+  color: var(--signal);
+}
