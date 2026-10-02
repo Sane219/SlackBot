@@ -1,5 +1,6 @@
 mod config;
 mod domain;
+mod scheduler;
 mod llm;
 mod evidence;
 mod github;

@@ -17,6 +17,8 @@ pub enum StoreError {
     JobNotFound(i64),
     #[error("draft {0} not found")]
     DraftNotFound(i64),
+    #[error("fire {0} not found")]
+    FireNotFound(i64),
     #[error("could not decode stored {what}: {source}")]
     Decode {
         what: &'static str,
@@ -291,6 +293,14 @@ pub fn list_fires(conn: &Connection, limit: i64) -> Result<Vec<Fire>> {
             },
         )
         .collect()
+}
+
+/// One Fire by id.
+pub fn get_fire(conn: &Connection, id: i64) -> Result<Fire> {
+    list_fires(conn, 1000)?
+        .into_iter()
+        .find(|f| f.id == id)
+        .ok_or(StoreError::FireNotFound(id))
 }
 
 // ── Drafts ─────────────────────────────────────────────────────────────────
