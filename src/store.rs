@@ -411,6 +411,7 @@ pub fn release_claim(conn: &Connection, id: i64) -> Result<()> {
 }
 
 /// Mark a Draft approved. Used by tests and by callers that already hold the claim.
+#[cfg(test)]
 pub fn mark_approved(conn: &Connection, id: i64, at: chrono::DateTime<chrono::Utc>) -> Result<()> {
     let changed = conn.execute(
         "UPDATE drafts SET approved = 1, approved_at = ?2 WHERE id = ?1",

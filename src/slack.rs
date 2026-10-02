@@ -322,6 +322,22 @@ impl SlackClient {
         Ok((collected, cursor.is_some()))
     }
 
+    /// Messages in a channel, discarding the truncation flag.
+    ///
+    /// The live source uses `history_with_cap` so it can report truncation. This wrapper
+    /// is for callers and tests that do not render the result.
+    #[cfg(test)]
+    pub async fn history(
+        &self,
+        channel: &str,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<SlackMessage>, SlackError> {
+        self.history_with_cap(channel, from, to)
+            .await
+            .map(|(messages, _)| messages)
+    }
+
     /// Channels the user is a member of, for activity-based discovery.
     #[allow(dead_code)]
     pub async fn channels(&self) -> Result<Vec<SlackChannel>, SlackError> {

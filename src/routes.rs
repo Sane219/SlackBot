@@ -221,7 +221,7 @@ async fn save_credential(
                 StatusCode::BAD_REQUEST,
                 format!(
                     "paste the value only, without the `d=` prefix (it starts with {})",
-                    &rest.chars().take(8).collect::<String>()
+                    rest.chars().take(8).collect::<String>()
                 ),
             ));
         }
