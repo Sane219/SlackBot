@@ -5,17 +5,14 @@
 //! mrkdwn and has no authority over schedules. Neither can post — only `approve_draft`
 //! reaches Slack, and that is in the web layer.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::Job;
-use crate::evidence::{draft_instructions, NO_SIGNAL_TEXT};
+use crate::evidence::draft_instructions;
 use crate::secrets::Secret;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LlmError {
-    #[error("no model configured")]
-    NotConfigured,
     #[error("llm returned {status}: {body}")]
     Api { status: u16, body: String },
     #[error("llm response was not valid json: {0}")]
@@ -106,10 +103,6 @@ impl LlmClient {
         }
     }
 
-    pub fn config(&self) -> &LlmConfig {
-        &self.config
-    }
-
     async fn complete(&self, system: &str, user: &str) -> Result<String, LlmError> {
         let body = ChatRequest {
             model: &self.config.model,
@@ -148,10 +141,7 @@ impl LlmClient {
                     .unwrap_or("unknown")
                     .to_string();
                 return Err(LlmError::Api {
-                    status: err
-                        .get("code")
-                        .and_then(|c| c.as_u64())
-                        .unwrap_or(0) as u16,
+                    status: err.get("code").and_then(|c| c.as_u64()).unwrap_or(0) as u16,
                     body: message,
                 });
             }
@@ -201,10 +191,7 @@ impl LlmClient {
     ///
     /// This proposes. Nothing is scheduled until the user confirms the rendered
     /// preview (ADR-0004 means the model may not name anything on its own authority).
-    pub async fn plan(
-        &self,
-        description: &str,
-    ) -> Result<Vec<PlannedJob>, LlmError> {
+    pub async fn plan(&self, description: &str) -> Result<Vec<PlannedJob>, LlmError> {
         let schema = "{\"jobs\":[{\"name\":\"...\",\"at\":\"HH:MM 24-hour\",\
                        \"tz\":\"IANA timezone\",\"channel\":\"#name\",\
                        \"context\":\"lookback|since\",\"since_at\":\"HH:MM\",\
@@ -329,11 +316,6 @@ impl PlannedJob {
 
         out
     }
-
-    /// How long a lookback Job should reach back, when the model did not say.
-    pub fn lookback_hours(&self) -> i64 {
-        8
-    }
 }
 
 /// Parse the Plan Role's reply. A model that wraps JSON in prose is a common failure, so
@@ -362,11 +344,10 @@ fn parse_plan(raw: &str) -> Result<Vec<PlannedJob>, LlmError> {
         jobs: Vec<PlannedJob>,
     }
 
-    let plan: Plan = serde_json::from_str(json)
-        .map_err(|e| LlmError::UnusablePlan {
-            detail: e.to_string(),
-            raw: raw.to_string(),
-        })?;
+    let plan: Plan = serde_json::from_str(json).map_err(|e| LlmError::UnusablePlan {
+        detail: e.to_string(),
+        raw: raw.to_string(),
+    })?;
 
     if plan.jobs.is_empty() {
         return Err(LlmError::UnusablePlan {
@@ -389,21 +370,13 @@ fn parse_plan(raw: &str) -> Result<Vec<PlannedJob>, LlmError> {
     Ok(plan.jobs)
 }
 
-/// When a Fire's window closed, for display.
-pub fn window_label(from: DateTime<Utc>, to: DateTime<Utc>) -> String {
-    format!("{} → {}", from.format("%d %b %H:%M"), to.format("%d %b %H:%M"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::evidence::NO_SIGNAL_TEXT;
 
     fn config() -> LlmConfig {
         LlmConfig::new("http://localhost:9/v1", "test-model", Secret::new("k"))
-    }
-
-    fn client() -> LlmClient {
-        LlmClient::new(config())
     }
 
     fn valid_plan_json() -> &'static str {
@@ -498,7 +471,10 @@ mod tests {
     #[test]
     fn a_wrapped_code_fence_is_removed_from_a_draft() {
         // A fence would post to Slack literally.
-        assert_eq!(clean_draft("```\nDay Task:\n• *x*: y\n```"), "Day Task:\n• *x*: y");
+        assert_eq!(
+            clean_draft("```\nDay Task:\n• *x*: y\n```"),
+            "Day Task:\n• *x*: y"
+        );
         assert_eq!(clean_draft("```markdown\nDay Task:\n```"), "Day Task:");
     }
 

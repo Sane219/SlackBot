@@ -56,7 +56,11 @@ fn request(method: &str, path: &str, body: Option<&str>) -> Response {
         .nth(1)
         .and_then(|c| c.parse().ok())
         .unwrap_or(0);
-    let body = raw.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("").to_string();
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b)
+        .unwrap_or("")
+        .to_string();
 
     Response { status, body }
 }
@@ -191,7 +195,10 @@ fn the_inbox_lists_drafts_and_fires_in_one_response() {
 #[test]
 #[ignore = "needs a running server"]
 fn planning_without_a_model_is_refused_with_a_clear_message() {
-    let res = post("/api/plan", serde_json::json!({"description": "I post three times a day"}));
+    let res = post(
+        "/api/plan",
+        serde_json::json!({"description": "I post three times a day"}),
+    );
     // Either no model is configured, or the plan failed. Both are honest refusals;
     // neither should look like a working schedule.
     assert!(
@@ -248,11 +255,17 @@ fn a_disabled_job_can_be_toggled() {
     }
     let id = res.json()["id"].as_i64().unwrap();
 
-    let off = patch(&format!("/api/jobs/{id}"), serde_json::json!({"enabled": false}));
+    let off = patch(
+        &format!("/api/jobs/{id}"),
+        serde_json::json!({"enabled": false}),
+    );
     assert_eq!(off.status, 200);
     assert_eq!(off.json()["enabled"], false);
 
-    let on = patch(&format!("/api/jobs/{id}"), serde_json::json!({"enabled": true}));
+    let on = patch(
+        &format!("/api/jobs/{id}"),
+        serde_json::json!({"enabled": true}),
+    );
     assert_eq!(on.json()["enabled"], true);
 
     request("DELETE", &format!("/api/jobs/{id}"), None);

@@ -4,7 +4,7 @@
 //! Approve. They carry no I/O and no framework types, so both the scheduler and the HTTP
 //! layer can speak them without agreeing on anything but this file.
 
-use chrono::{DateTime, Local, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Where a Job's channel points.
@@ -22,7 +22,9 @@ pub struct ChannelRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContextWindow {
-    Lookback { hours: i64 },
+    Lookback {
+        hours: i64,
+    },
     /// `at` is a wall-clock time **in the Job's timezone**, not UTC.
     Since {
         at: String,
@@ -39,9 +41,7 @@ impl ContextWindow {
     /// Resolve the window ending at `now`.
     pub fn resolve(&self, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
         match self {
-            ContextWindow::Lookback { hours } => {
-                (now - chrono::Duration::hours(*hours), now)
-            }
+            ContextWindow::Lookback { hours } => (now - chrono::Duration::hours(*hours), now),
             ContextWindow::Since {
                 at,
                 previous_day,
@@ -58,8 +58,8 @@ impl ContextWindow {
                     (Some(zone), Some(time)) => {
                         let local_now = now.with_timezone(&zone);
                         // Signed day arithmetic. `Days::new` takes u64 and would drop the sign, silently
-// turning "yesterday" into "today".
-let day = local_now.date_naive() + chrono::Duration::days(day_offset);
+                        // turning "yesterday" into "today".
+                        let day = local_now.date_naive() + chrono::Duration::days(day_offset);
                         zone.from_local_datetime(&day.and_time(time))
                             .earliest()
                             .map(|t| t.with_timezone(&Utc))
@@ -82,13 +82,12 @@ let day = local_now.date_naive() + chrono::Duration::days(day_offset);
     }
 
     /// The window's own description, for logs and the UI.
+    #[allow(dead_code)]
     pub fn label(&self) -> String {
         match self {
             ContextWindow::Lookback { hours } => format!("last {hours}h"),
             ContextWindow::Since {
-                at,
-                previous_day,
-                ..
+                at, previous_day, ..
             } => {
                 if *previous_day {
                     format!("since {at} previous day")
@@ -97,7 +96,11 @@ let day = local_now.date_naive() + chrono::Duration::days(day_offset);
                 }
             }
             ContextWindow::Explicit { from, to } => {
-                format!("{} → {}", from.format("%d %b %H:%M"), to.format("%d %b %H:%M"))
+                format!(
+                    "{} → {}",
+                    from.format("%d %b %H:%M"),
+                    to.format("%d %b %H:%M")
+                )
             }
         }
     }
@@ -129,15 +132,14 @@ impl Schedule {
         let today = local_now.date_naive();
 
         // Today's occurrence, or tomorrow's if it has already passed.
-        let candidate_today = zone
-            .from_local_datetime(&today.and_time(time))
-            .earliest()?;
+        let candidate_today = zone.from_local_datetime(&today.and_time(time)).earliest()?;
 
         let next = if candidate_today > local_now {
             candidate_today
         } else {
             let tomorrow = today + chrono::Days::new(1);
-            zone.from_local_datetime(&tomorrow.and_time(time)).earliest()?
+            zone.from_local_datetime(&tomorrow.and_time(time))
+                .earliest()?
         };
 
         Some(next.with_timezone(&Utc))
@@ -179,6 +181,7 @@ pub enum FireOutcome {
 
 impl FireOutcome {
     /// The code shown in the spine's code column. State speaks in code.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn code(&self) -> &'static str {
         match self {
             FireOutcome::Drafted => "ACT",
@@ -260,11 +263,6 @@ pub struct Draft {
 /// UTC now, named so tests read clearly.
 pub fn now() -> DateTime<Utc> {
     Utc::now()
-}
-
-/// Local wall-clock rendering, for display only. Never for scheduling.
-pub fn local_string(t: DateTime<Utc>, fmt: &str) -> String {
-    t.with_timezone(&Local).format(fmt).to_string()
 }
 
 /// A monotonic-ish marker used to suppress duplicate due-times within one tick.
@@ -418,7 +416,13 @@ mod tests {
     #[test]
     fn tick_key_collapses_a_twenty_second_window() {
         let base = utc(2026, 10, 2, 12, 0);
-        assert_eq!(tick_key(base), tick_key(base + chrono::Duration::seconds(19)));
-        assert_ne!(tick_key(base + chrono::Duration::seconds(19)), tick_key(base + chrono::Duration::seconds(20)));
+        assert_eq!(
+            tick_key(base),
+            tick_key(base + chrono::Duration::seconds(19))
+        );
+        assert_ne!(
+            tick_key(base + chrono::Duration::seconds(19)),
+            tick_key(base + chrono::Duration::seconds(20))
+        );
     }
 }

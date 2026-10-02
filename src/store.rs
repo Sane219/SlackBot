@@ -5,9 +5,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::domain::{
-    ChannelRef, ContextWindow, Counts, Draft, Fire, FireOutcome, Job, Schedule,
-};
+use crate::domain::{ChannelRef, Draft, Fire, FireOutcome, Job};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -36,7 +34,8 @@ pub fn open(path: &std::path::Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// An in-memory database, for tests and for `--ephemeral`.
+/// An in-memory database, for tests.
+#[cfg(test)]
 pub fn open_in_memory() -> Result<Connection> {
     let conn = Connection::open_in_memory()?;
     migrate(&conn)?;
@@ -109,10 +108,7 @@ fn migrate(conn: &Connection) -> Result<()> {
 // ── Jobs ───────────────────────────────────────────────────────────────────
 
 /// Insert a Job and return its id.
-pub fn insert_job(
-    conn: &Connection,
-    job: &Job,
-) -> Result<i64> {
+pub fn insert_job(conn: &Connection, job: &Job) -> Result<i64> {
     conn.execute(
         "INSERT INTO jobs (name, schedule, channel_id, channel_name, context_window,
                            prompt_template, enabled, last_fired_at)
@@ -277,21 +273,19 @@ pub fn list_fires(conn: &Connection, limit: i64) -> Result<Vec<Fire>> {
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     rows.into_iter()
-        .map(
-            |(id, job_id, fired_at, outcome, no_signal, error)| {
-                Ok(Fire {
-                    id,
-                    job_id,
-                    fired_at: fired_at
-                        .parse()
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    outcome: serde_json::from_str(&outcome)
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    no_signal: no_signal != 0,
-                    error,
-                })
-            },
-        )
+        .map(|(id, job_id, fired_at, outcome, no_signal, error)| {
+            Ok(Fire {
+                id,
+                job_id,
+                fired_at: fired_at
+                    .parse()
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                outcome: serde_json::from_str(&outcome)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                no_signal: no_signal != 0,
+                error,
+            })
+        })
         .collect()
 }
 
@@ -360,10 +354,7 @@ pub fn mark_approved(conn: &Connection, id: i64, at: chrono::DateTime<chrono::Ut
 /// Not a delete. ADR-0006 keeps discarded Drafts in the chain, and a hard delete would
 /// either cascade away a child or trip the foreign key.
 pub fn discard_draft(conn: &Connection, id: i64) -> Result<()> {
-    let changed = conn.execute(
-        "UPDATE drafts SET discarded = 1 WHERE id = ?1",
-        params![id],
-    )?;
+    let changed = conn.execute("UPDATE drafts SET discarded = 1 WHERE id = ?1", params![id])?;
     if changed == 0 {
         return Err(StoreError::DraftNotFound(id));
     }
@@ -380,7 +371,7 @@ pub fn get_draft(conn: &Connection, id: i64) -> Result<Draft> {
 /// Unapproved Drafts, newest first. The Inbox.
 pub fn list_unapproved(conn: &Connection) -> Result<Vec<Draft>> {
     let mut drafts = list_drafts(conn)?;
-    drafts.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    drafts.sort_by_key(|d| std::cmp::Reverse(d.created_at));
     Ok(drafts
         .into_iter()
         .filter(|d| !d.approved && !d.discarded)
@@ -419,24 +410,36 @@ pub fn list_drafts(conn: &Connection) -> Result<Vec<Draft>> {
 
     rows.into_iter()
         .map(
-            |(id, job_id, fire_id, text, from, to, counts, no_signal, partial, parent, created, edited, approved, approved_at, discarded)| {
+            |(
+                id,
+                job_id,
+                fire_id,
+                text,
+                from,
+                to,
+                counts,
+                no_signal,
+                partial,
+                parent,
+                created,
+                edited,
+                approved,
+                approved_at,
+                discarded,
+            )| {
                 Ok(Draft {
                     id,
                     job_id,
                     fire_id,
                     text,
-                    window_from: from
-                        .parse()
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    window_from: from.parse().map_err(|_| rusqlite::Error::InvalidQuery)?,
                     window_to: to.parse().map_err(|_| rusqlite::Error::InvalidQuery)?,
                     counts: serde_json::from_str(&counts)
                         .map_err(|_| rusqlite::Error::InvalidQuery)?,
                     no_signal: no_signal != 0,
                     partial: partial != 0,
                     parent_id: parent,
-                    created_at: created
-                        .parse()
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    created_at: created.parse().map_err(|_| rusqlite::Error::InvalidQuery)?,
                     edited: edited != 0,
                     approved: approved != 0,
                     approved_at: approved_at.and_then(|s| s.parse().ok()),
@@ -452,6 +455,7 @@ pub fn list_drafts(conn: &Connection) -> Result<Vec<Draft>> {
 /// ADR-0006: a discarded Draft stays in the chain as a hole rather than being reparented
 /// away, so this skips over missing rows. Implemented as a bounded walk rather than a
 /// recursive CTE so a corrupt chain cannot loop forever.
+#[allow(dead_code)]
 pub fn nearest_ancestor(conn: &Connection, draft_id: i64) -> Result<Option<i64>> {
     let mut cursor = draft_id;
     let mut hops = 0;
@@ -540,6 +544,7 @@ fn sqlite_json_err(err: serde_json::Error) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{ContextWindow, Counts, Schedule};
     use chrono::Utc;
 
     fn sample_job(name: &str) -> Job {
@@ -618,10 +623,26 @@ mod tests {
         let conn = open_in_memory().unwrap();
         let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
 
-        let first = record_fire(&conn, job_id, Utc::now(), FireOutcome::Drafted, false, None, 100)
-            .unwrap();
-        let second = record_fire(&conn, job_id, Utc::now(), FireOutcome::Drafted, false, None, 100)
-            .unwrap();
+        let first = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            100,
+        )
+        .unwrap();
+        let second = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            100,
+        )
+        .unwrap();
 
         assert!(first.is_some(), "first Fire in a tick is recorded");
         assert!(second.is_none(), "duplicate due time is suppressed");
@@ -643,10 +664,17 @@ mod tests {
     fn draft_roundtrips_and_stays_in_the_inbox_until_approved() {
         let conn = open_in_memory().unwrap();
         let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
-        let fire_id =
-            record_fire(&conn, job_id, Utc::now(), FireOutcome::Drafted, false, None, 1)
-                .unwrap()
-                .unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
 
         let draft_id = insert_draft(&conn, &sample_draft(job_id, fire_id, "hello")).unwrap();
 
@@ -663,10 +691,17 @@ mod tests {
     fn inbox_is_newest_first() {
         let conn = open_in_memory().unwrap();
         let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
-        let fire_id =
-            record_fire(&conn, job_id, Utc::now(), FireOutcome::Drafted, false, None, 1)
-                .unwrap()
-                .unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
 
         let mut older = sample_draft(job_id, fire_id, "older");
         older.created_at = Utc::now() - chrono::Duration::hours(2);
@@ -682,10 +717,17 @@ mod tests {
     fn discarding_a_draft_promotes_its_parent_as_the_seed() {
         let conn = open_in_memory().unwrap();
         let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
-        let fire_id =
-            record_fire(&conn, job_id, Utc::now(), FireOutcome::Drafted, false, None, 1)
-                .unwrap()
-                .unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
 
         let grandparent = insert_draft(&conn, &sample_draft(job_id, fire_id, "gp")).unwrap();
         let mut middle = sample_draft(job_id, fire_id, "parent");
@@ -708,10 +750,17 @@ mod tests {
     fn ancestor_walk_terminates_on_a_draft_with_no_parent() {
         let conn = open_in_memory().unwrap();
         let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
-        let fire_id =
-            record_fire(&conn, job_id, Utc::now(), FireOutcome::Drafted, false, None, 1)
-                .unwrap()
-                .unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
         let leaf = insert_draft(&conn, &sample_draft(job_id, fire_id, "leaf")).unwrap();
         assert_eq!(nearest_ancestor(&conn, leaf).unwrap(), None);
     }
@@ -720,10 +769,17 @@ mod tests {
     fn pruning_keeps_approved_drafts_and_drops_stale_unapproved_ones() {
         let conn = open_in_memory().unwrap();
         let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
-        let fire_id =
-            record_fire(&conn, job_id, Utc::now(), FireOutcome::Drafted, false, None, 1)
-                .unwrap()
-                .unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
 
         let mut stale_approved = sample_draft(job_id, fire_id, "kept");
         stale_approved.created_at = Utc::now() - chrono::Duration::days(90);
@@ -744,10 +800,17 @@ mod tests {
     fn deleting_a_job_cascades_to_its_fires_and_drafts() {
         let conn = open_in_memory().unwrap();
         let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
-        let fire_id =
-            record_fire(&conn, job_id, Utc::now(), FireOutcome::Drafted, false, None, 1)
-                .unwrap()
-                .unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
         insert_draft(&conn, &sample_draft(job_id, fire_id, "x")).unwrap();
 
         delete_job(&conn, job_id).unwrap();

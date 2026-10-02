@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use std::fmt::Write as _;
 
 use crate::domain::Counts;
-use crate::github::{ActivityKind, GithubActivity};
+use crate::github::GithubActivity;
 use crate::slack::SlackMessage;
 
 /// One thing the user did, from either integration.
@@ -137,7 +137,9 @@ fn replace_links(input: &str) -> String {
 
         // Only treat it as a link if it actually looks like one. `inner == "<"` is the
         // empty span that `a < b` produces, and it must survive.
-        if inner.starts_with("http://") || inner.starts_with("https://") || inner.starts_with("mailto:")
+        if inner.starts_with("http://")
+            || inner.starts_with("https://")
+            || inner.starts_with("mailto:")
         {
             match inner.split_once('|') {
                 Some((_, label)) if !label.is_empty() => out.push_str(label),
@@ -225,7 +227,7 @@ pub fn render(
 
     // Newest first, so trimming the tail drops the oldest work.
     let mut ordered: Vec<&Activity> = activity.iter().collect();
-    ordered.sort_by(|a, b| activity_time(b).cmp(&activity_time(a)));
+    ordered.sort_by_key(|a| std::cmp::Reverse(activity_time(a)));
 
     let mut lines: Vec<String> = Vec::new();
     let mut kept_slack = 0u32;
@@ -250,9 +252,12 @@ pub fn render(
                     continue;
                 }
                 let when = g.created_at.format("%d %b %H:%M");
-                format!("- {when} {code} {}/{} #{} {} {}", g.repo, "", g.number, g.title, body)
-                    .trim_end()
-                    .to_string()
+                format!(
+                    "- {when} {code} {}/{} #{} {} {}",
+                    g.repo, "", g.number, g.title, body
+                )
+                .trim_end()
+                .to_string()
             }
         };
 
@@ -299,7 +304,7 @@ pub fn render(
     if no_signal {
         let _ = writeln!(text, "## No activity recorded in this window.");
     } else {
-        text.push_str("\n");
+        text.push('\n');
         text.push_str(&lines.join("\n"));
     }
 
@@ -350,6 +355,7 @@ pub fn draft_instructions() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::ActivityKind;
     use crate::slack::SlackMessage;
     use chrono::TimeZone;
 
@@ -395,8 +401,14 @@ mod tests {
 
     #[test]
     fn links_keep_their_label() {
-        assert_eq!(sanitize_slack("see <https://x.test/PR|PR #482>"), "see PR #482");
-        assert_eq!(sanitize_slack("see <https://x.test/PR>"), "see https://x.test/PR");
+        assert_eq!(
+            sanitize_slack("see <https://x.test/PR|PR #482>"),
+            "see PR #482"
+        );
+        assert_eq!(
+            sanitize_slack("see <https://x.test/PR>"),
+            "see https://x.test/PR"
+        );
     }
 
     #[test]
@@ -410,7 +422,10 @@ mod tests {
         let (from, to) = window();
         let activity = vec![Activity::Slack {
             channel: "coot-ai".into(),
-            message: msg(1_779_000_000, "cc <@U0A9WPY4S1F|nayab> on <https://x.test/PR|PR #482>"),
+            message: msg(
+                1_779_000_000,
+                "cc <@U0A9WPY4S1F|nayab> on <https://x.test/PR|PR #482>",
+            ),
         }];
         let rendered = render(&activity, from, to, SourceStatus::both(), 4000);
         assert!(rendered.text.contains("@nayab"));
@@ -433,10 +448,9 @@ mod tests {
         assert!(rendered.counts.slack_messages < 40);
         assert!(rendered.counts.is_truncated());
         // The coverage line must state the drop, or the model overstates the day.
-        assert!(rendered.text.contains(&format!(
-            "of {} messages",
-            rendered.counts.slack_fetched
-        )));
+        assert!(rendered
+            .text
+            .contains(&format!("of {} messages", rendered.counts.slack_fetched)));
         assert!(rendered.text.contains("trimmed"));
     }
 
@@ -511,8 +525,6 @@ mod tests {
             title: "failover jitter".into(),
             body: "needs a rebase before merge\nmore detail".into(),
             created_at: at(10),
-            updated_at: at(10),
-            url: "https://github.test/x".into(),
         })];
 
         let rendered = render(&activity, from, to, SourceStatus::both(), 4000);

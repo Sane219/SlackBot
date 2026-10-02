@@ -7,14 +7,13 @@
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::domain::{Draft, Fire, FireOutcome, Job, now};
+use crate::domain::{now, Draft, Fire, Job};
 use crate::evidence::NO_SIGNAL_TEXT;
 use crate::llm::{LlmClient, LlmError, PlannedJob};
 use crate::scheduler::FireRunner;
@@ -77,7 +76,9 @@ async fn health(State(state): State<AppState>) -> Json<Health> {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
         configured: PresentCredentials::probe(state.secrets.as_ref()),
-        inbox: store::list_unapproved(&lock(&state)).map(|d| d.len()).unwrap_or(0),
+        inbox: store::list_unapproved(&lock(&state))
+            .map(|d| d.len())
+            .unwrap_or(0),
     })
 }
 
@@ -105,10 +106,6 @@ async fn setup_status(State(state): State<AppState>) -> Json<SetupStatus> {
 struct SaveCredential {
     kind: SecretKind,
     value: String,
-    /// `llm` and `github` are the only kinds that take an endpoint alongside the value.
-    #[serde(default)]
-    base_url: Option<String>,
-    model: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -129,7 +126,10 @@ async fn save_credential(
     // An empty value is rejected rather than stored: a blank credential fails later, at
     // a Fire, where the cause is much harder to see.
     if value.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "a credential value is required".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "a credential value is required".into(),
+        ));
     }
 
     // The Slack cookie is passed exactly as the browser sent it. Decoding it is the most
@@ -219,8 +219,10 @@ async fn verify_credential(
             let Ok(token) = state.secrets.get(SecretKind::GithubToken) else {
                 return Ok(Json(fail("github", "no token stored yet".into())));
             };
-            let client =
-                crate::github::GithubClient::new(token, std::env::var("GITHUB_LOGIN").unwrap_or_default());
+            let client = crate::github::GithubClient::new(
+                token,
+                std::env::var("GITHUB_LOGIN").unwrap_or_default(),
+            );
             match client.whoami().await {
                 Ok(login) => {
                     let _ = crate::config::write_github_login(&settings, &login);
@@ -236,10 +238,7 @@ async fn verify_credential(
         }
         SecretKind::LlmApiKey => {
             let Some(client) = state.llm.as_ref() else {
-                return Ok(Json(fail(
-                    "llm",
-                    "set the endpoint and model first".into(),
-                )));
+                return Ok(Json(fail("llm", "set the endpoint and model first".into())));
             };
             match client.probe().await {
                 Ok(models) => VerifyResult {
@@ -294,7 +293,10 @@ async fn save_llm(
     let probe = crate::llm::LlmConfig::new(
         base_url.clone(),
         model.clone(),
-        state.secrets.get(SecretKind::LlmApiKey).unwrap_or(Secret::new("")),
+        state
+            .secrets
+            .get(SecretKind::LlmApiKey)
+            .unwrap_or(Secret::new("")),
     );
     let client = LlmClient::new(probe);
 
@@ -371,10 +373,10 @@ async fn plan(
         ));
     }
 
-    let llm = state
-        .llm
-        .as_ref()
-        .ok_or((StatusCode::PRECONDITION_FAILED, "no model is configured yet".into()))?;
+    let llm = state.llm.as_ref().ok_or((
+        StatusCode::PRECONDITION_FAILED,
+        "no model is configured yet".into(),
+    ))?;
 
     match llm.plan(&description).await {
         Ok(jobs) => Ok(Json(PlanResponse { jobs })),
@@ -500,9 +502,8 @@ async fn update_job(
                 format!("{at:?} is not a HH:MM time"),
             ));
         }
-        if let crate::domain::Schedule::Daily { at: existing, .. } = &mut job.schedule {
-            *existing = at;
-        }
+        let crate::domain::Schedule::Daily { at: existing, .. } = &mut job.schedule;
+        *existing = at;
     }
     if let Some(tz) = body.tz {
         if tz.parse::<chrono_tz::Tz>().is_err() {
@@ -511,9 +512,8 @@ async fn update_job(
                 format!("{tz:?} is not a known IANA timezone"),
             ));
         }
-        if let crate::domain::Schedule::Daily { tz: existing, .. } = &mut job.schedule {
-            *existing = tz;
-        }
+        let crate::domain::Schedule::Daily { tz: existing, .. } = &mut job.schedule;
+        *existing = tz;
     }
     if let Some(enabled) = body.enabled {
         job.enabled = enabled;
@@ -616,10 +616,10 @@ async fn regenerate_draft(
     Path(id): Path<i64>,
 ) -> Result<Json<Draft>, ApiError> {
     let draft = store::get_draft(&lock(&state), id)?;
-    let runner = state
-        .runner
-        .as_ref()
-        .ok_or((StatusCode::PRECONDITION_FAILED, "no evidence source is configured".into()))?;
+    let runner = state.runner.as_ref().ok_or((
+        StatusCode::PRECONDITION_FAILED,
+        "no evidence source is configured".into(),
+    ))?;
     let job = store::get_job(&lock(&state), draft.job_id)?;
 
     let activity = runner
@@ -652,7 +652,10 @@ async fn regenerate_draft(
         state
             .llm
             .as_ref()
-            .ok_or((StatusCode::PRECONDITION_FAILED, "no model is configured yet".into()))?
+            .ok_or((
+                StatusCode::PRECONDITION_FAILED,
+                "no model is configured yet".into(),
+            ))?
             .draft(&job, &rendered.text, parent_text.as_deref())
             .await
             .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
@@ -698,17 +701,16 @@ async fn approve(
             ok: false,
             ts: String::new(),
             note: Some(
-                "nothing was collected for that window, so there was nothing to post"
-                    .into(),
+                "nothing was collected for that window, so there was nothing to post".into(),
             ),
         }));
     }
 
     let job = store::get_job(&lock(&state), draft.job_id)?;
-    let slack = state
-        .slack
-        .as_ref()
-        .ok_or((StatusCode::PRECONDITION_FAILED, "slack is not configured yet".into()))?;
+    let slack = state.slack.as_ref().ok_or((
+        StatusCode::PRECONDITION_FAILED,
+        "slack is not configured yet".into(),
+    ))?;
 
     let ts = slack
         .post(&job.channel.id, &draft.text)
@@ -732,10 +734,10 @@ async fn fire_now(
     Path(id): Path<i64>,
 ) -> Result<Json<Draft>, ApiError> {
     let job = store::get_job(&lock(&state), id)?;
-    let runner = state
-        .runner
-        .as_ref()
-        .ok_or((StatusCode::PRECONDITION_FAILED, "no evidence source is configured".into()))?;
+    let runner = state.runner.as_ref().ok_or((
+        StatusCode::PRECONDITION_FAILED,
+        "no evidence source is configured".into(),
+    ))?;
 
     // The lock is held only for the short database step, never across the model's network
     // call: a Fire must not block every other request for the seconds a draft takes.
@@ -805,11 +807,17 @@ pub fn router(state: AppState) -> Router {
         .route("/api/setup/verify", post(verify_credential))
         .route("/api/setup/llm", get(llm_settings).post(save_llm))
         .route("/api/jobs", get(list_jobs).post(create_job))
-        .route("/api/jobs/{id}", axum::routing::patch(update_job).delete(delete_job))
+        .route(
+            "/api/jobs/{id}",
+            axum::routing::patch(update_job).delete(delete_job),
+        )
         .route("/api/jobs/{id}/fire", post(fire_now))
         .route("/api/plan", post(plan))
         .route("/api/inbox", get(inbox))
-        .route("/api/drafts/{id}", axum::routing::patch(edit_draft).delete(discard_draft))
+        .route(
+            "/api/drafts/{id}",
+            axum::routing::patch(edit_draft).delete(discard_draft),
+        )
         .route("/api/drafts/{id}/regenerate", post(regenerate_draft))
         .route("/api/drafts/{id}/approve", post(approve))
         .with_state(state)
@@ -817,7 +825,7 @@ pub fn router(state: AppState) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::domain::FireOutcome;
 
     /// ADR-0001: `chat.postMessage` is reachable from exactly one function. A second
     /// caller would mean something could post without a human clicking Approve.

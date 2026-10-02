@@ -22,8 +22,6 @@ const MAX_PAGES: usize = 20;
 
 #[derive(Debug, thiserror::Error)]
 pub enum SlackError {
-    #[error("slack credentials are incomplete: {0}")]
-    IncompleteCredentials(&'static str),
     #[error("secret store: {0}")]
     Secrets(#[from] SecretError),
     #[error("slack returned {code}: {message}")]
@@ -79,13 +77,12 @@ struct RepliesPayload {
     messages: Vec<SlackMessage>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct TestPayload {}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct SlackChannel {
+    #[allow(dead_code)]
     pub id: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub name: String,
 }
 
@@ -100,7 +97,9 @@ pub struct SlackMessage {
     pub text: Option<String>,
     #[serde(default = "default_subtype")]
     pub subtype: Option<String>,
+    /// Read by the live source to decide whether a thread is worth reading.
     #[serde(default)]
+    #[allow(dead_code)]
     pub reply_count: Option<u32>,
 }
 
@@ -153,11 +152,13 @@ impl SlackClient {
     }
 
     /// Point at a test server. Never used in production.
+    #[allow(dead_code)]
     pub fn with_base_url(mut self, base: impl Into<String>) -> Self {
         self.base = base.into().trim_end_matches('/').to_string();
         self
     }
 
+    #[allow(dead_code)]
     pub fn user_id(&self) -> &str {
         &self.user_id
     }
@@ -199,8 +200,14 @@ impl SlackClient {
             // Passed exactly as the browser sent it, percent-escapes intact. Decoding
             // it is the most likely way to break an otherwise-correct setup, and it
             // presents as a wrong token rather than a mangled cookie.
-            .header(reqwest::header::COOKIE, format!("d={}", self.cookie.expose()))
-            .header("Content-Type", "application/x-www-form-urlencoded; charset=utf-8");
+            .header(
+                reqwest::header::COOKIE,
+                format!("d={}", self.cookie.expose()),
+            )
+            .header(
+                "Content-Type",
+                "application/x-www-form-urlencoded; charset=utf-8",
+            );
 
         for (key, value) in query {
             request = request.query(&[(key, value.as_str())]);
@@ -219,11 +226,13 @@ impl SlackClient {
                 _ => code.clone(),
             };
 
-            return Err(if code == "invalid_auth" || code == "not_authed" || code == "token_revoked" {
-                SlackError::SessionExpired { code }
-            } else {
-                SlackError::Api { code, message }
-            });
+            return Err(
+                if code == "invalid_auth" || code == "not_authed" || code == "token_revoked" {
+                    SlackError::SessionExpired { code }
+                } else {
+                    SlackError::Api { code, message }
+                },
+            );
         }
 
         let cursor = response
@@ -243,8 +252,6 @@ impl SlackClient {
         struct AuthTest {
             #[serde(default)]
             user_id: String,
-            #[serde(default)]
-            team: String,
         }
 
         let (payload, _): (AuthTest, Option<String>) = self.call("auth.test", &[]).await?;
@@ -252,6 +259,7 @@ impl SlackClient {
     }
 
     /// The user identity, used to discover which identity this install is about.
+    #[allow(dead_code)]
     pub async fn whoami(&self) -> Result<String, SlackError> {
         self.verify().await
     }
@@ -284,14 +292,18 @@ impl SlackClient {
             let (payload, next): (HistoryPayload, Option<String>) =
                 self.call("conversations.history", &query).await?;
 
-            collected.extend(payload.messages.into_iter().filter(|m| m.is_from(&user)).map(
-                |mut m| {
-                    // `user` was only a discriminator for the filter above. Drop it so
-                    // the renderer never has to reason about whose message this is.
-                    m.user = None;
-                    m
-                },
-            ));
+            collected.extend(
+                payload
+                    .messages
+                    .into_iter()
+                    .filter(|m| m.is_from(&user))
+                    .map(|mut m| {
+                        // `user` was only a discriminator for the filter above. Drop it so
+                        // the renderer never has to reason about whose message this is.
+                        m.user = None;
+                        m
+                    }),
+            );
 
             match next {
                 Some(c) => cursor = Some(c),
@@ -303,6 +315,7 @@ impl SlackClient {
     }
 
     /// Channels the user is a member of, for activity-based discovery.
+    #[allow(dead_code)]
     pub async fn channels(&self) -> Result<Vec<SlackChannel>, SlackError> {
         let mut out: Vec<SlackChannel> = Vec::new();
         let mut cursor: Option<String> = None;
@@ -330,6 +343,7 @@ impl SlackClient {
     ///
     /// A reply is real work that a strict self-filter would hide, so a Fire that saw a
     /// thread worth reading also reads the thread.
+    #[allow(dead_code)]
     pub async fn replies(&self, channel: &str, ts: &str) -> Result<Vec<SlackMessage>, SlackError> {
         let (payload, _): (RepliesPayload, Option<String>) = self
             .call(
@@ -367,7 +381,10 @@ impl SlackClient {
             .http
             .post(format!("{}/chat.postMessage", self.base))
             .bearer_auth(self.token.expose())
-            .header(reqwest::header::COOKIE, format!("d={}", self.cookie.expose()))
+            .header(
+                reqwest::header::COOKIE,
+                format!("d={}", self.cookie.expose()),
+            )
             .header("Content-Type", "application/json; charset=utf-8")
             .body(serde_json::to_string(&body).unwrap_or_default())
             .send()
@@ -375,8 +392,8 @@ impl SlackClient {
             .text()
             .await?;
 
-        let response: ApiResponse<PostPayload> = serde_json::from_str(&text_body)
-            .map_err(|e| SlackError::Decode(e.to_string()))?;
+        let response: ApiResponse<PostPayload> =
+            serde_json::from_str(&text_body).map_err(|e| SlackError::Decode(e.to_string()))?;
 
         if !response.ok {
             let code = response.error.unwrap_or_else(|| "unknown".into());

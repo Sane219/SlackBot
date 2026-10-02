@@ -1,0 +1,72 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      - name: Test
+        run: cargo test
+
+  # The end-to-end suite needs a listening server, so it runs after a build rather than
+  # as part of `cargo test`. Without this the HTTP contract is only ever checked by hand.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Start the server on a scratch database
+        run: |
+          SLACKBOT_DATA_DIR="$RUNNER_TEMP/slackbot" \
+          SLACKBOT_PORT=7321 \
+            ./target/debug/slackbot >"$RUNNER_TEMP/server.log" 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:7321/api/health >/dev/null; then
+              echo "server is up"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the server did not start:"
+          cat "$RUNNER_TEMP/server.log"
+          exit 1
+
+      - name: End-to-end
+        env:
+          SLACKBOT_E2E_URL: http://127.0.0.1:7321
+        run: cargo test --test e2e -- --ignored --test-threads=1
+
+      - name: Server log
+        if: always()
+        run: cat "$RUNNER_TEMP/server.log"

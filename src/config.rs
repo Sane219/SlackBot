@@ -23,9 +23,7 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self {
-            port: DEFAULT_PORT,
-        }
+        Self { port: DEFAULT_PORT }
     }
 }
 
@@ -234,7 +232,12 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("api_key"));
         assert!(!raw.contains("sk-"));
-        assert_eq!(raw.lines().filter(|l| !l.starts_with('#') && !l.is_empty()).count(), 2);
+        assert_eq!(
+            raw.lines()
+                .filter(|l| !l.starts_with('#') && !l.is_empty())
+                .count(),
+            2
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

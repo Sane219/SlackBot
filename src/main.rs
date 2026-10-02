@@ -30,17 +30,30 @@ const APP_CSS: &str = include_str!("web/app.css");
 const APP_JS: &str = include_str!("web/app.js");
 
 fn assets() -> axum::Router {
-    use axum::{http::header, response::IntoResponse, routing::get};
+    use axum::{http::header, routing::get};
     axum::Router::new()
-        .route("/", get(|| async {
-            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], INDEX_HTML)
-        }))
-        .route("/app.css", get(|| async {
-            ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], APP_CSS)
-        }))
-        .route("/app.js", get(|| async {
-            ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], APP_JS)
-        }))
+        .route(
+            "/",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    INDEX_HTML,
+                )
+            }),
+        )
+        .route(
+            "/app.css",
+            get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], APP_CSS) }),
+        )
+        .route(
+            "/app.js",
+            get(|| async {
+                (
+                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+                    APP_JS,
+                )
+            }),
+        )
 }
 
 /// Build the LLM client from the saved settings and the keychain, if both exist.
@@ -91,7 +104,10 @@ async fn main() {
     let conn = match store::open(&config::db_path()) {
         Ok(conn) => Arc::new(std::sync::Mutex::new(conn)),
         Err(err) => {
-            eprintln!("could not open the database at {}: {err}", config::db_path().display());
+            eprintln!(
+                "could not open the database at {}: {err}",
+                config::db_path().display()
+            );
             std::process::exit(1);
         }
     };
@@ -119,7 +135,6 @@ async fn main() {
     let source = Arc::new(LiveSource {
         slack: slack.as_ref().map(|s| (**s).clone()),
         github: github.as_ref().map(|g| (**g).clone()),
-        token_budget: 12_000,
     });
 
     let runner = Arc::new(FireRunner {
@@ -143,7 +158,8 @@ async fn main() {
             // The guard is dropped before the sleep. Holding it across an await would make
             // this task's future non-Send and would block every HTTP request for the whole
             // tick, which includes the model's network call.
-            if let Err(err) = scheduler::tick(&scheduler_runner, &scheduler_conn, domain::now()).await
+            if let Err(err) =
+                scheduler::tick(&scheduler_runner, &scheduler_conn, domain::now()).await
             {
                 eprintln!("scheduler tick: {err}");
             }

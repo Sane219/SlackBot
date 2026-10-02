@@ -9,9 +9,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 
-use crate::domain::{
-    tick_key, Counts, Draft, Fire, FireOutcome, Job, now,
-};
+use crate::domain::{tick_key, Draft, Fire, FireOutcome, Job};
 use crate::evidence::{self, Activity, Rendered, SourceStatus, NO_SIGNAL_TEXT};
 use crate::github::GithubClient;
 use crate::llm::LlmClient;
@@ -47,7 +45,6 @@ pub trait EvidenceSource: Send + Sync {
 pub struct LiveSource {
     pub slack: Option<SlackClient>,
     pub github: Option<GithubClient>,
-    pub token_budget: usize,
 }
 
 impl EvidenceSource for LiveSource {
@@ -107,12 +104,14 @@ impl EvidenceSource for LiveSource {
 }
 
 /// A source that returns a fixed list, for tests.
+#[cfg(test)]
 #[derive(Clone)]
 pub struct FixedSource {
     pub activity: Vec<Activity>,
     pub fail_with: Option<String>,
 }
 
+#[cfg(test)]
 impl EvidenceSource for FixedSource {
     fn collect(
         &self,
@@ -147,17 +146,6 @@ pub struct Collected {
     pub to: DateTime<Utc>,
     pub outcome: FireOutcome,
     pub error: Option<String>,
-}
-
-/// A Fire that has been collected and recorded, awaiting its Draft.
-///
-/// Returned from `record_fire_at` so the caller can drop the database lock before
-/// calling the model: a Fire's network work must not block every other request.
-pub struct PendingFire {
-    pub fire_id: i64,
-    pub rendered: Rendered,
-    pub from: DateTime<Utc>,
-    pub to: DateTime<Utc>,
 }
 
 /// One run of the loop: decide what is due, fire it, record it.
@@ -219,11 +207,7 @@ impl FireRunner {
     /// Collect and render, but write nothing. Takes no connection: the network work
     /// happens here, and holding the database lock across it would block every other
     /// request for the seconds a Fire takes.
-    pub async fn collect_for_fire(
-        &self,
-        job: &Job,
-        at: DateTime<Utc>,
-    ) -> Collected {
+    pub async fn collect_for_fire(&self, job: &Job, at: DateTime<Utc>) -> Collected {
         let (from, to) = job.context_window.resolve(at);
 
         let (activity, status, error) = match self.source.collect(job.clone(), from, to).await {
@@ -280,7 +264,12 @@ impl FireRunner {
 
     /// Compose the Draft's text. Async and lock-free: the model call happens here, then
     /// the caller writes the result in one short step.
-    pub async fn compose_text(&self, job: &Job, collected: &Collected, seed: Option<String>) -> String {
+    pub async fn compose_text(
+        &self,
+        job: &Job,
+        collected: &Collected,
+        seed: Option<String>,
+    ) -> String {
         // A Fire that collected nothing never calls the model: the gap marker is a
         // decision, not a prompt.
         if collected.rendered.no_signal {
@@ -370,14 +359,6 @@ impl FireRunner {
             .map_err(|e| e.to_string())?;
         Ok(stmt.query_row([job_id], |row| row.get::<_, i64>(0)).ok())
     }
-
-    fn source_has_slack(&self) -> bool {
-        true
-    }
-
-    fn source_has_github(&self) -> bool {
-        true
-    }
 }
 
 /// Tick the clock: fire every Job that is due, and record the ones that were missed.
@@ -447,10 +428,7 @@ async fn tick_locked(
 ///
 /// The user chose "keep the app running" over catch-up (ADR-0007), so these are marked
 /// `missed` and listed in the UI, never retro-fired.
-pub fn mark_missed(
-    conn: &rusqlite::Connection,
-    at: DateTime<Utc>,
-) -> Result<usize, String> {
+pub fn mark_missed(conn: &rusqlite::Connection, at: DateTime<Utc>) -> Result<usize, String> {
     let jobs = store::list_jobs(conn).map_err(|e| e.to_string())?;
     let mut marked = 0;
 
@@ -502,7 +480,7 @@ pub fn mark_missed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{ChannelRef, ContextWindow, Schedule};
+    use crate::domain::{ChannelRef, ContextWindow, Counts, Schedule};
     use crate::llm::{LlmClient, LlmConfig};
     use crate::secrets::Secret;
     use chrono::TimeZone;
@@ -551,26 +529,14 @@ mod tests {
     }
 
     fn llm(server: &MockServer) -> LlmClient {
-        LlmClient::new(
-            LlmConfig::new(server.uri(), "test-model", Secret::new("k")).with_v1(""),
-        )
-    }
-
-    // A tiny extension so the base URL needs no manual /v1.
-    trait WithV1 {
-        fn with_v1(self, path: &str) -> Self;
-    }
-    impl WithV1 for LlmConfig {
-        fn with_v1(mut self, _path: &str) -> Self {
-            self
-        }
+        LlmClient::new(LlmConfig::new(server.uri(), "test-model", Secret::new("k")))
     }
 
     #[tokio::test]
     async fn a_fire_produces_exactly_one_draft() {
         let conn = db();
-        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
-        let job = store::get_job(&*c(&conn), job_id).unwrap();
+        let job_id = store::insert_job(&c(&conn), &job("Day Task")).unwrap();
+        let job = store::get_job(&c(&conn), job_id).unwrap();
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -596,7 +562,7 @@ mod tests {
         let fire = runner.fire(&conn, &job, at).await.unwrap().unwrap();
 
         assert_eq!(fire.outcome, FireOutcome::Drafted);
-        let inbox = store::list_unapproved(&*c(&conn)).unwrap();
+        let inbox = store::list_unapproved(&c(&conn)).unwrap();
         assert_eq!(inbox.len(), 1);
         assert!(inbox[0].text.contains("jitter"));
         assert!(!inbox[0].no_signal);
@@ -605,8 +571,8 @@ mod tests {
     #[tokio::test]
     async fn an_empty_window_produces_the_gap_marker_not_a_hedge() {
         let conn = db();
-        let job_id = store::insert_job(&*c(&conn), &job("Progress")).unwrap();
-        let job = store::get_job(&*c(&conn), job_id).unwrap();
+        let job_id = store::insert_job(&c(&conn), &job("Progress")).unwrap();
+        let job = store::get_job(&c(&conn), job_id).unwrap();
 
         let server = MockServer::start().await;
         let runner = FireRunner {
@@ -623,18 +589,18 @@ mod tests {
         // The Fire is recorded, and its Draft says nothing happened.
         assert_eq!(fire.outcome, FireOutcome::Drafted);
         assert!(fire.no_signal);
-        let inbox = store::list_unapproved(&*c(&conn)).unwrap();
+        let inbox = store::list_unapproved(&c(&conn)).unwrap();
         assert_eq!(inbox[0].text, NO_SIGNAL_TEXT);
         assert!(inbox[0].no_signal);
         // No signal must not have called the model at all.
-        assert_eq!(store::list_fires(&*c(&conn), 10).unwrap().len(), 1);
+        assert_eq!(store::list_fires(&c(&conn), 10).unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn a_collect_failure_records_a_failed_fire_with_the_reason() {
         let conn = db();
-        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
-        let job = store::get_job(&*c(&conn), job_id).unwrap();
+        let job_id = store::insert_job(&c(&conn), &job("Day Task")).unwrap();
+        let job = store::get_job(&c(&conn), job_id).unwrap();
 
         let server = MockServer::start().await;
         let runner = FireRunner {
@@ -655,8 +621,8 @@ mod tests {
     #[tokio::test]
     async fn a_due_time_is_not_fired_twice_in_the_same_tick() {
         let conn = db();
-        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
-        let job = store::get_job(&*c(&conn), job_id).unwrap();
+        let job_id = store::insert_job(&c(&conn), &job("Day Task")).unwrap();
+        let job = store::get_job(&c(&conn), job_id).unwrap();
 
         let server = MockServer::start().await;
         let runner = FireRunner {
@@ -673,20 +639,32 @@ mod tests {
         let at = Utc.with_ymd_and_hms(2026, 10, 2, 4, 0, 0).unwrap();
         assert!(runner.fire(&conn, &job, at).await.unwrap().is_some());
         // Same 20s tick: the index refuses a second row.
-        assert!(runner.fire(&conn, &job, at + chrono::Duration::seconds(5)).await.unwrap().is_none());
-        assert_eq!(store::list_fires(&*c(&conn), 10).unwrap().len(), 1);
+        assert!(runner
+            .fire(&conn, &job, at + chrono::Duration::seconds(5))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(store::list_fires(&c(&conn), 10).unwrap().len(), 1);
     }
 
     #[tokio::test]
     async fn a_draft_seeds_from_the_previous_cycle() {
         let conn = db();
-        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
-        let job = store::get_job(&*c(&conn), job_id).unwrap();
+        let job_id = store::insert_job(&c(&conn), &job("Day Task")).unwrap();
+        let job = store::get_job(&c(&conn), job_id).unwrap();
 
         // Seed a prior Draft the "user" already wrote.
-        let fire_id = store::record_fire(&*c(&conn), job_id, Utc::now(), FireOutcome::Drafted, false, None, 1)
-            .unwrap()
-            .unwrap();
+        let fire_id = store::record_fire(
+            &c(&conn),
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
         let previous = Draft {
             id: 0,
             job_id,
@@ -704,7 +682,7 @@ mod tests {
             approved_at: None,
             discarded: false,
         };
-        store::insert_draft(&*c(&conn), &previous).unwrap();
+        store::insert_draft(&c(&conn), &previous).unwrap();
 
         let server = MockServer::start().await;
         let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -745,30 +723,38 @@ mod tests {
     fn a_job_that_never_fired_is_not_marked_missed() {
         // No baseline to judge a miss against.
         let conn = db();
-        store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
-        let marked = mark_missed(&*c(&conn), Utc::now()).unwrap();
+        store::insert_job(&c(&conn), &job("Day Task")).unwrap();
+        let marked = mark_missed(&c(&conn), Utc::now()).unwrap();
         assert_eq!(marked, 0);
     }
 
     #[test]
     fn a_job_that_fired_yesterday_and_was_off_today_is_marked_missed() {
         let conn = db();
-        let job_id = store::insert_job(&*c(&conn), &job("Day Task")).unwrap();
+        let job_id = store::insert_job(&c(&conn), &job("Day Task")).unwrap();
 
         // Record a Fire from yesterday at the job's own 09:30 IST.
         let yesterday = Utc.with_ymd_and_hms(2026, 10, 1, 4, 0, 0).unwrap();
-        store::record_fire(&*c(&conn), job_id, yesterday, FireOutcome::Drafted, false, None, 1)
-            .unwrap();
+        store::record_fire(
+            &c(&conn),
+            job_id,
+            yesterday,
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap();
 
         // Two days later, the app is starting up.
         let later = Utc.with_ymd_and_hms(2026, 10, 3, 12, 0, 0).unwrap();
-        let marked = mark_missed(&*c(&conn), later).unwrap();
+        let marked = mark_missed(&c(&conn), later).unwrap();
 
         // Missed, recorded, and NOT retro-fired: no Draft was created.
         assert!(marked > 0);
-        let fires = store::list_fires(&*c(&conn), 50).unwrap();
+        let fires = store::list_fires(&c(&conn), 50).unwrap();
         assert!(fires.iter().any(|f| f.outcome == FireOutcome::Missed));
-        assert!(store::list_unapproved(&*c(&conn)).unwrap().is_empty());
+        assert!(store::list_unapproved(&c(&conn)).unwrap().is_empty());
     }
 
     #[test]
@@ -776,10 +762,10 @@ mod tests {
         let conn = db();
         let mut disabled = job("Day Task");
         disabled.enabled = false;
-        store::insert_job(&*c(&conn), &disabled).unwrap();
+        store::insert_job(&c(&conn), &disabled).unwrap();
 
         let at = Utc.with_ymd_and_hms(2026, 10, 2, 4, 0, 0).unwrap();
-        assert_eq!(mark_missed(&*c(&conn), at).unwrap(), 0);
+        assert_eq!(mark_missed(&c(&conn), at).unwrap(), 0);
     }
 
     #[tokio::test]
@@ -790,18 +776,21 @@ mod tests {
             at: "half past nine".into(),
             tz: "Asia/Kolkata".into(),
         };
-        let job_id = store::insert_job(&*c(&conn), &broken).unwrap();
+        let job_id = store::insert_job(&c(&conn), &broken).unwrap();
 
         let server = MockServer::start().await;
         let runner = FireRunner {
-            source: Arc::new(FixedSource { activity: Vec::new(), fail_with: None }),
+            source: Arc::new(FixedSource {
+                activity: Vec::new(),
+                fail_with: None,
+            }),
             llm: Arc::new(llm(&server)),
         };
 
         tick(&runner, &conn, Utc::now()).await.unwrap();
 
         // A config error must be visible, not a Job that quietly never runs.
-        let fires = store::list_fires(&*c(&conn), 10).unwrap();
+        let fires = store::list_fires(&c(&conn), 10).unwrap();
         assert_eq!(fires.len(), 1);
         assert_eq!(fires[0].job_id, job_id);
         assert_eq!(fires[0].outcome, FireOutcome::Failed);

@@ -14,8 +14,6 @@ const BASE: &str = "https://api.github.com";
 
 #[derive(Debug, thiserror::Error)]
 pub enum GithubError {
-    #[error("github credentials are incomplete: {0}")]
-    IncompleteCredentials(&'static str),
     #[error("secret store: {0}")]
     Secrets(#[from] SecretError),
     #[error("github returned {status}: {message}")]
@@ -40,8 +38,6 @@ pub struct GithubActivity {
     pub title: String,
     pub body: String,
     pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,21 +57,14 @@ impl ActivityKind {
     }
 }
 
-/// One repository's comment streams.
-#[derive(Debug, Deserialize)]
-struct RepoComments {
-    #[serde(default)]
-    issue_comments: Vec<IssueCommentWire>,
-    #[serde(default)]
-    review_comments: Vec<ReviewCommentWire>,
-}
-
 #[derive(Debug, Deserialize)]
 struct IssueCommentWire {
-    id: u64,
     body: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    /// Kept so a Draft can cite where a comment came from. The renderer does not
+    /// emit links yet, so this is currently unread.
+    #[allow(dead_code)]
     html_url: Option<String>,
     #[serde(default)]
     issue: Option<IssueRef>,
@@ -92,10 +81,12 @@ struct IssueRef {
 
 #[derive(Debug, Deserialize)]
 struct ReviewCommentWire {
-    id: u64,
     body: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    /// Kept so a Draft can cite where a comment came from. The renderer does not
+    /// emit links yet, so this is currently unread.
+    #[allow(dead_code)]
     html_url: Option<String>,
     #[serde(default)]
     pull_request: Option<PullRef>,
@@ -130,13 +121,10 @@ impl GithubClient {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_base_url(mut self, base: impl Into<String>) -> Self {
         self.base = base.into().trim_end_matches('/').to_string();
         self
-    }
-
-    pub fn login(&self) -> &str {
-        &self.login
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, GithubError> {
@@ -157,10 +145,7 @@ impl GithubClient {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
             if let Some(message) = value.get("message").and_then(|m| m.as_str()) {
                 return Err(GithubError::Api {
-                    status: value
-                        .get("status")
-                        .and_then(|s| s.as_u64())
-                        .unwrap_or(0) as u16,
+                    status: value.get("status").and_then(|s| s.as_u64()).unwrap_or(0) as u16,
                     message: message.to_string(),
                 });
             }
@@ -228,13 +213,13 @@ impl GithubClient {
                 title: issue.title.unwrap_or_default(),
                 body: comment.body.unwrap_or_default(),
                 created_at: comment.created_at,
-                updated_at: comment.updated_at,
-                url: comment.html_url.unwrap_or_default(),
             });
         }
 
         for comment in review_comments {
-            let Some(pull) = comment.pull_request else { continue };
+            let Some(pull) = comment.pull_request else {
+                continue;
+            };
             if !in_window(comment.created_at, comment.updated_at) {
                 continue;
             }
@@ -245,13 +230,11 @@ impl GithubClient {
                 title: pull.title.unwrap_or_default(),
                 body: comment.body.unwrap_or_default(),
                 created_at: comment.created_at,
-                updated_at: comment.updated_at,
-                url: comment.html_url.unwrap_or_default(),
             });
         }
 
         // Newest first, so a budget trim keeps the most recent work.
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|a| std::cmp::Reverse(a.created_at));
         Ok(out)
     }
 
@@ -260,10 +243,7 @@ impl GithubClient {
     /// `search/issues` with `author:` finds repos the user opened issues on. It is a
     /// locator here and nothing more — no attempt is made to collect activity from it,
     /// because `commenter:` and `author:` both miss review comments.
-    pub async fn discover_repos(
-        &self,
-        since: DateTime<Utc>,
-    ) -> Result<Vec<String>, GithubError> {
+    pub async fn discover_repos(&self, since: DateTime<Utc>) -> Result<Vec<String>, GithubError> {
         let query = format!(
             "author:{} author-date:>={}",
             self.login,
@@ -356,13 +336,15 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/repos/coot/ai/pulls/comments"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([{
-                "id": 1, "body": "needs a rebase",
-                "created_at": "2026-10-02T09:00:00Z",
-                "updated_at": "2026-10-02T09:00:00Z",
-                "html_url": "https://github.com/coot/ai/pull/482#c1",
-                "pull_request": {"number": 482, "title": "failover jitter"}
-            }])))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "id": 1, "body": "needs a rebase",
+                    "created_at": "2026-10-02T09:00:00Z",
+                    "updated_at": "2026-10-02T09:00:00Z",
+                    "html_url": "https://github.com/coot/ai/pull/482#c1",
+                    "pull_request": {"number": 482, "title": "failover jitter"}
+                }])),
+            )
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -387,13 +369,15 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/repos/coot/ai/issues/comments"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([{
-                "id": 2, "body": "blocked on review",
-                "created_at": "2026-10-02T10:00:00Z",
-                "updated_at": "2026-10-02T10:00:00Z",
-                "html_url": "https://github.com/coot/ai/issues/9#c2",
-                "issue": {"number": 9, "title": "indexer chunking"}
-            }])))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                    "id": 2, "body": "blocked on review",
+                    "created_at": "2026-10-02T10:00:00Z",
+                    "updated_at": "2026-10-02T10:00:00Z",
+                    "html_url": "https://github.com/coot/ai/issues/9#c2",
+                    "issue": {"number": 9, "title": "indexer chunking"}
+                }])),
+            )
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -418,8 +402,9 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/user"))
             .respond_with(
-                ResponseTemplate::new(401)
-                    .set_body_json(serde_json::json!({"message": "Bad credentials", "status": 401})),
+                ResponseTemplate::new(401).set_body_json(
+                    serde_json::json!({"message": "Bad credentials", "status": 401}),
+                ),
             )
             .mount(&server)
             .await;
@@ -437,7 +422,10 @@ mod tests {
 
     #[test]
     fn urlencode_escapes_a_search_query() {
-        assert_eq!(urlencode("author:sanket129 author-date:>=2026-10-01"), "author%3Asanket129+author-date%3A%3E%3D2026-10-01");
+        assert_eq!(
+            urlencode("author:sanket129 author-date:>=2026-10-01"),
+            "author%3Asanket129+author-date%3A%3E%3D2026-10-01"
+        );
     }
 
     #[tokio::test]

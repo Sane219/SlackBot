@@ -4,6 +4,7 @@
 //! keychain. Nothing here logs, formats, or returns a secret in an error message: a
 //! `Display` impl on a secret type is a leak waiting to happen, so there isn't one.
 
+#[cfg(test)]
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -26,6 +27,7 @@ impl SecretKind {
         }
     }
 
+    #[cfg(test)]
     pub const ALL: [SecretKind; 4] = [
         SecretKind::LlmApiKey,
         SecretKind::SlackToken,
@@ -57,7 +59,9 @@ impl Secret {
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Length only: enough to tell "wrong length" from "empty", useless to an attacker.
-        f.debug_tuple("Secret").field(&format_args!("<{} chars>", self.0.len())).finish()
+        f.debug_tuple("Secret")
+            .field(&format_args!("<{} chars>", self.0.len()))
+            .finish()
     }
 }
 
@@ -72,6 +76,8 @@ pub enum SecretError {
 pub trait SecretStore: Send + Sync {
     fn set(&self, kind: SecretKind, secret: &Secret) -> Result<(), SecretError>;
     fn get(&self, kind: SecretKind) -> Result<Secret, SecretError>;
+    /// Remove a stored secret. Wired when a credential is cleared in Setup.
+    #[allow(dead_code)]
     fn delete(&self, kind: SecretKind) -> Result<(), SecretError>;
 }
 
@@ -119,11 +125,13 @@ impl SecretStore for KeychainStore {
 }
 
 /// An in-memory store for tests. Never used in production.
+#[cfg(test)]
 #[derive(Default)]
 pub struct MemoryStore {
     inner: std::sync::Mutex<HashMap<SecretKind, Secret>>,
 }
 
+#[cfg(test)]
 impl SecretStore for MemoryStore {
     fn set(&self, kind: SecretKind, secret: &Secret) -> Result<(), SecretError> {
         self.inner
@@ -166,12 +174,7 @@ pub struct PresentCredentials {
 impl PresentCredentials {
     /// Read presence from a store without ever exposing the values.
     pub fn probe(store: &dyn SecretStore) -> Self {
-        let has = |kind: SecretKind| {
-            store
-                .get(kind)
-                .map(|s| s.looks_present())
-                .unwrap_or(false)
-        };
+        let has = |kind: SecretKind| store.get(kind).map(|s| s.looks_present()).unwrap_or(false);
         Self {
             llm: has(SecretKind::LlmApiKey),
             slack_token: has(SecretKind::SlackToken),
@@ -201,7 +204,10 @@ mod tests {
         store
             .set(SecretKind::LlmApiKey, &Secret::new("sk-test"))
             .unwrap();
-        assert_eq!(store.get(SecretKind::LlmApiKey).unwrap().expose(), "sk-test");
+        assert_eq!(
+            store.get(SecretKind::LlmApiKey).unwrap().expose(),
+            "sk-test"
+        );
     }
 
     #[test]
