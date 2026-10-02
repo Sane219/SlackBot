@@ -1,4 +1,5 @@
 mod config;
+mod domain;
 
 use axum::{
     http::header,

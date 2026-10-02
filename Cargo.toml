@@ -20,8 +20,30 @@ serde_json = "1"
 # Open the setup UI in a browser on startup.
 open = "5"
 
+# HTTP client for Slack, GitHub and the LLM.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+
+# Persistence: Jobs, Drafts and the Fire log (ADR-0007).
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# Secrets never touch the config file. Behind a trait so tests can substitute.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+# Wall-clock scheduling. Timezones are per Job, never global.
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+
+# Error ergonomics for a library surface.
+thiserror = "2"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
+# HTTP mocking for the Slack, GitHub and LLM clients.
+wiremock = "0.6"
+tempfile = "3"
 
 [profile.release]
 lto = "thin"
