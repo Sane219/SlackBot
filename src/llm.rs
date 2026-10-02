@@ -171,14 +171,25 @@ impl LlmClient {
             id: String,
         }
 
-        let text = self
+        let http = self
             .http
             .get(format!("{}/models", self.config.base_url))
             .bearer_auth(self.config.api_key.expose())
             .send()
-            .await?
-            .text()
             .await?;
+
+        let status = http.status();
+        let text = http.text().await?;
+
+        // A wrong key answers 401 with a JSON error envelope. Without this check the
+        // setup screen said "llm response was not valid json: missing field data" for a
+        // simple bad key (ADR-0008 wants the failure to name the problem).
+        if !status.is_success() {
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                body: error_message_from(&text).unwrap_or_else(|| text.chars().take(200).collect()),
+            });
+        }
 
         let response: ModelsResponse =
             serde_json::from_str(&text).map_err(|e| LlmError::Decode(e.to_string()))?;
@@ -249,20 +260,52 @@ impl LlmClient {
     }
 }
 
+/// Pull `error.message` out of an OpenAI-compatible error envelope, if present.
+fn error_message_from(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let message = value.get("message").and_then(|m| m.as_str())?;
+    let detail = value
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str());
+    Some(match detail {
+        Some(detail) if detail != message => format!("{message}: {detail}"),
+        _ => message.to_string(),
+    })
+}
+
 /// Strip the shapes a model adds that a Slack post must not contain.
 fn clean_draft(raw: &str) -> String {
     let mut text = raw.trim().to_string();
 
     // Remove a wrapping code fence, which a model adds reflexively and which would post
     // literally.
-    if text.starts_with("```") {
-        let mut lines = text.lines();
-        lines.next();
-        if let Some(last) = lines.next_back() {
-            if last.trim().starts_with("```") {
-                text = lines.collect::<Vec<_>>().join("\n");
-            }
+    if let Some(rest) = text.strip_prefix("```") {
+        // Drop the language tag on the opening fence if there is one.
+        let after_tag = rest
+            .split_once('\n')
+            .filter(|(first, _)| !first.contains('`'))
+            .map(|(_, body)| body)
+            .unwrap_or(rest);
+
+        // Only drop a trailing line if it is actually the closing fence. A truncated
+        // response has real content on its last line, and dropping it would silently
+        // lose a point from the post.
+        let mut lines: Vec<&str> = after_tag.lines().collect();
+        if lines
+            .last()
+            .map(|l| l.trim().starts_with("```"))
+            .unwrap_or(false)
+        {
+            lines.pop();
         }
+        text = lines.join("\n");
+    }
+
+    // A model that emitted only a fence leaves nothing; an empty Draft would post as an
+    // empty message, which is indistinguishable from a bug in the channel.
+    if text.trim().is_empty() {
+        return String::new();
     }
 
     text.trim().to_string()
@@ -476,6 +519,24 @@ mod tests {
             "Day Task:\n• *x*: y"
         );
         assert_eq!(clean_draft("```markdown\nDay Task:\n```"), "Day Task:");
+    }
+
+    #[test]
+    fn a_truncated_fence_does_not_post_the_backticks() {
+        // The old version kept the opening fence when there was no closing one, so a
+        // truncated response posted a literal "```" to the channel.
+        assert_eq!(
+            clean_draft("```\nDay Task:\n• *x*: y"),
+            "Day Task:\n• *x*: y"
+        );
+        assert_eq!(clean_draft("```markdown\nDay Task:"), "Day Task:");
+    }
+
+    #[test]
+    fn a_response_of_only_a_fence_becomes_empty_rather_than_backticks() {
+        // An empty Draft would post as an empty message; the caller refuses to send it.
+        assert_eq!(clean_draft("```\n```"), "");
+        assert_eq!(clean_draft("```"), "");
     }
 
     #[test]

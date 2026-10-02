@@ -139,6 +139,8 @@ async fn main() {
 
     let runner = Arc::new(FireRunner {
         source,
+        has_slack: slack.is_some(),
+        has_github: github.is_some(),
         llm: llm.clone().unwrap_or_else(|| {
             // A placeholder so the type is satisfied; every path that uses it checks
             // `llm.is_some()` first and refuses with a clear message.

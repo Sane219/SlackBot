@@ -38,6 +38,10 @@ pub struct GithubActivity {
     pub title: String,
     pub body: String,
     pub created_at: DateTime<Utc>,
+    /// Kept because `since` filters on it: a comment written weeks ago and edited today
+    /// arrives in today's window, and the renderer has to say so rather than date it
+    /// outside the window it claims to cover.
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +168,32 @@ impl GithubClient {
         Ok(user.login)
     }
 
+    /// Every page of a comment endpoint, up to a cap.
+    ///
+    /// The cap is a cost bound, not a correctness one: a window with more comments than
+    /// this is implausible for a single person in a working day.
+    async fn get_all<T: serde::de::DeserializeOwned + serde::de::DeserializeOwned>(
+        &self,
+        base: &str,
+        since: &str,
+    ) -> Result<Vec<T>, GithubError> {
+        const MAX_PAGES: usize = 10;
+
+        let mut all = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let path = format!(
+                "{base}?since={since}&sort=updated&direction=desc&per_page=100&page={page}"
+            );
+            let batch: Vec<T> = self.get(&path).await?;
+            let count = batch.len();
+            all.extend(batch);
+            if count < 100 {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
     /// The user's own comments in one repository within a window.
     ///
     /// `sort=updated&direction=desc` is mandatory: with ascending order and `since`,
@@ -177,18 +207,20 @@ impl GithubClient {
         from: DateTime<Utc>,
         to: DateTime<Utc>,
     ) -> Result<Vec<GithubActivity>, GithubError> {
-        let since = from.to_rfc3339();
+        // `to_rfc3339()` emits "+00:00", and GitHub form-decodes the query string, so the
+        // "+" arrives as a space and the value is not valid RFC3339. `Z` avoids the
+        // problem entirely and GitHub accepts it.
+        let since = from.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let full = format!("{owner}/{repo}");
 
-        let issue_path = format!(
-            "repos/{full}/issues/comments?since={since}&sort=updated&direction=desc&per_page=100"
-        );
-        let review_path = format!(
-            "repos/{full}/pulls/comments?since={since}&sort=updated&direction=desc&per_page=100"
-        );
-
-        let issue_fut = self.get::<Vec<IssueCommentWire>>(&issue_path);
-        let review_fut = self.get::<Vec<ReviewCommentWire>>(&review_path);
+        // Paged. Without this a user with more than 100 comments in the window silently
+        // loses the rest, and `github_fetched` counts only what arrived — so the Evidence
+        // reported "40 of 40 comments" while 60 were never read. ADR-0005 exists to make
+        // truncation visible, and this hid it in the reassuring direction.
+        let issues_base = format!("repos/{full}/issues/comments");
+        let pulls_base = format!("repos/{full}/pulls/comments");
+        let issue_fut = self.get_all::<IssueCommentWire>(&issues_base, &since);
+        let review_fut = self.get_all::<ReviewCommentWire>(&pulls_base, &since);
         let (issue_comments, review_comments) = tokio::try_join!(issue_fut, review_fut)?;
 
         let mut out: Vec<GithubActivity> = Vec::new();
@@ -213,6 +245,7 @@ impl GithubClient {
                 title: issue.title.unwrap_or_default(),
                 body: comment.body.unwrap_or_default(),
                 created_at: comment.created_at,
+                updated_at: comment.updated_at,
             });
         }
 
@@ -230,6 +263,7 @@ impl GithubClient {
                 title: pull.title.unwrap_or_default(),
                 body: comment.body.unwrap_or_default(),
                 created_at: comment.created_at,
+                updated_at: comment.updated_at,
             });
         }
 

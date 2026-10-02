@@ -25,7 +25,14 @@ async function api(path, options = {}) {
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  // An HTML error page must not be reported as a parse error: the status says more.
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    throw new Error("the server returned a response this page could not read");
+  }
   if (!res.ok) {
     throw new Error((data && data[1]) || `HTTP ${res.status}`);
   }
@@ -115,6 +122,9 @@ function renderInbox() {
   }
 
   for (const draft of state.drafts) {
+    // Leave a card the user is editing alone until they are done with it.
+    if (beingEdited.has(draft.id)) continue;
+
     const card = el("div", { className: `draft-card${draft.no_signal ? " draft-card--nosignal" : ""}` });
 
     card.append(el("div", { className: "draft-card__head" },
@@ -155,6 +165,9 @@ function renderInbox() {
       textarea.value = draft.text;
       card.append(textarea);
 
+      textarea.addEventListener("focus", () => beingEdited.add(draft.id));
+      textarea.addEventListener("blur", () => beingEdited.delete(draft.id));
+
       const approve = button("Approve & send", "btn btn--approve", async (ev) => {
         ev.target.disabled = true;
         try {
@@ -166,18 +179,22 @@ function renderInbox() {
         rerender();
       });
       actions.append(approve);
-      actions.append(button("Save edit", "btn btn--secondary", async () => {
+      actions.append(button("Save edit", "btn btn--secondary", async (ev) => {
+        ev.target.disabled = true;
         try {
           await api(`/api/drafts/${draft.id}`, { method: "PATCH", body: { text: textarea.value } });
+          beingEdited.delete(draft.id);
         } catch (err) {
           alert(`Could not save: ${err.message}`);
         }
         rerender();
       }));
       actions.append(button("Regenerate", "btn btn--secondary", async (ev) => {
-        ev.target.disabled = true;
-        // Re-fetches the original window, so the Draft's meaning cannot drift.
+        // Ask first, and only then disable: disabling before the confirm left the button
+        // dead for the life of the card if the user cancelled.
+        // Re-fetching re-reads the original window, so the Draft's meaning cannot drift.
         if (!confirm("Re-fetch the original window and draft again? The result may differ if messages have changed since.")) return;
+        ev.target.disabled = true;
         try {
           await api(`/api/drafts/${draft.id}/regenerate`, { method: "POST" });
         } catch (err) {
@@ -414,6 +431,11 @@ $("#plan-btn").addEventListener("click", async () => {
 });
 
 // ── poll ────────────────────────────────────────────────────────────────────
+
+// Cards the user is currently editing, keyed by draft id. A background poll must not
+// rebuild a card someone is typing in: it wiped the text every 20 seconds unless the
+// user clicked Save first, and cleared the disabled state of an in-flight Approve.
+const beingEdited = new Set();
 
 async function refresh() {
   try {

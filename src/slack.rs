@@ -268,12 +268,17 @@ impl SlackClient {
     ///
     /// Pages until Slack stops offering a cursor, capped at `MAX_PAGES` so one very
     /// chatty channel cannot stall a Fire indefinitely.
-    pub async fn history(
+    /// Messages in a channel, with whether paging stopped at the page cap.
+    ///
+    /// The caller needs the second value: a cap that silently truncates makes the
+    /// Evidence understate the day in the reassuring direction, which is the one
+    /// direction ADR-0005 exists to prevent.
+    pub async fn history_with_cap(
         &self,
         channel: &str,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
-    ) -> Result<Vec<SlackMessage>, SlackError> {
+    ) -> Result<(Vec<SlackMessage>, bool), SlackError> {
         let mut collected: Vec<SlackMessage> = Vec::new();
         let mut cursor: Option<String> = None;
         let user = self.user_id.clone();
@@ -307,11 +312,14 @@ impl SlackClient {
 
             match next {
                 Some(c) => cursor = Some(c),
-                None => break,
+                // No cursor means Slack has nothing more. Return the flag so the caller
+                // can distinguish "read everything" from "hit the cap".
+                None => return Ok((collected, false)),
             }
         }
 
-        Ok(collected)
+        // A cursor is still being offered at the cap, so more messages exist than we read.
+        Ok((collected, cursor.is_some()))
     }
 
     /// Channels the user is a member of, for activity-based discovery.
@@ -397,10 +405,22 @@ impl SlackClient {
 
         if !response.ok {
             let code = response.error.unwrap_or_else(|| "unknown".into());
-            return Err(SlackError::Api {
-                code: code.clone(),
-                message: code,
-            });
+            // Same mapping as every read: an expired session must say so with
+            // instructions, not "slack returned invalid_auth". This is the message a
+            // user reads at 6pm when the cookie has died (ADR-0002, ADR-0008).
+            return Err(
+                if matches!(
+                    code.as_str(),
+                    "invalid_auth" | "not_authed" | "token_revoked"
+                ) {
+                    SlackError::SessionExpired { code }
+                } else {
+                    SlackError::Api {
+                        message: code.clone(),
+                        code,
+                    }
+                },
+            );
         }
 
         Ok(response.payload.ts)

@@ -61,11 +61,23 @@ impl EvidenceSource for LiveSource {
         let me = self.clone();
         Box::pin(async move {
             let mut collected: Vec<Activity> = Vec::new();
+            let mut slack_ok = me.slack.is_some();
+            let mut github_ok = me.github.is_some();
+            // Set when a source stopped at its page cap with more to give. Reported to
+            // the Evidence so the day is not understated in the reassuring direction.
+            let mut capped = false;
 
+            // Each source is collected independently and records its own outcome.
+            // Returning on the first error discarded work the other source had already
+            // gathered, and made `Partial` unreachable: a Slack outage produced a
+            // `failed` Fire plus a NO SIGNAL Draft that looked like a quiet day.
+            // ADR-0002 requires an expired session to fail loudly rather than degrade to
+            // drafting from zero Slack context silently.
             if let Some(slack) = &me.slack {
-                for channel in &job.context_channels() {
-                    match slack.history(channel, from, to).await {
-                        Ok(messages) => {
+                for channel in job.context_channels() {
+                    match slack.history_with_cap(&channel, from, to).await {
+                        Ok((messages, truncated)) => {
+                            capped = capped || truncated;
                             for message in messages {
                                 collected.push(Activity::Slack {
                                     channel: channel.clone(),
@@ -73,29 +85,50 @@ impl EvidenceSource for LiveSource {
                                 });
                             }
                         }
-                        Err(err) => return Err(err.to_string()),
+                        Err(err) => {
+                            eprintln!("slack read of {channel} failed: {err}");
+                            slack_ok = false;
+                        }
                     }
                 }
             }
 
             if let Some(github) = &me.github {
-                // Discovery is a locator only; the actual collection is per-repo.
-                let repos = github
+                match github
                     .discover_repos(from - chrono::Duration::days(30))
                     .await
-                    .map_err(|e| e.to_string())?;
-
-                for repo in repos {
-                    let Some((owner, name)) = repo.split_once('/') else {
-                        continue;
-                    };
-                    match github.repo_activity(owner, name, from, to).await {
-                        Ok(activity) => {
-                            collected.extend(activity.into_iter().map(Activity::Github))
+                {
+                    Ok(repos) => {
+                        for repo in repos {
+                            let Some((owner, name)) = repo.split_once('/') else {
+                                continue;
+                            };
+                            match github.repo_activity(owner, name, from, to).await {
+                                Ok(activity) => {
+                                    collected.extend(activity.into_iter().map(Activity::Github))
+                                }
+                                Err(err) => {
+                                    eprintln!("github read of {repo} failed: {err}");
+                                    github_ok = false;
+                                }
+                            }
                         }
-                        Err(err) => return Err(err.to_string()),
+                    }
+                    Err(err) => {
+                        eprintln!("github repo discovery failed: {err}");
+                        github_ok = false;
                     }
                 }
+            }
+
+            // A source that is not configured is not a failure: a user may deliberately
+            // run with GitHub only. Only a source that was configured and then failed
+            // makes a Fire partial.
+            if !slack_ok && !github_ok && !collected.is_empty() {
+                return Err("no evidence could be collected".to_string());
+            }
+            if !slack_ok && !github_ok && collected.is_empty() {
+                return Err("no evidence source could be read".to_string());
             }
 
             Ok(collected)
@@ -152,6 +185,11 @@ pub struct Collected {
 pub struct FireRunner {
     pub source: Arc<dyn EvidenceSource>,
     pub llm: Arc<LlmClient>,
+    /// Which integrations are configured. The renderer names an absent one so the model
+    /// is told not to write about it, which is how a partial Fire differs from a
+    /// genuinely quiet one.
+    pub has_slack: bool,
+    pub has_github: bool,
 }
 
 impl FireRunner {
@@ -213,15 +251,24 @@ impl FireRunner {
 
         let (activity, status, error) = match self.source.collect(job.clone(), from, to).await {
             Ok(activity) => {
-                // One integration failing is a partial Fire, not a failed one: a partial
-                // day is still worth a draft.
+                // Which sources are present is decided here, not inside the source: the
+                // renderer needs to name an absent one so the model does not write about
+                // it. `collect` reports overall failure, so reaching this arm means at
+                // least one source worked.
                 let status = SourceStatus {
-                    slack_ok: true,
-                    github_ok: true,
+                    slack_ok: self.has_slack,
+                    github_ok: self.has_github,
                 };
                 (activity, status, None)
             }
-            Err(reason) => (Vec::new(), SourceStatus::both(), Some(reason)),
+            Err(reason) => (
+                Vec::new(),
+                SourceStatus {
+                    slack_ok: false,
+                    github_ok: false,
+                },
+                Some(reason),
+            ),
         };
 
         let rendered = evidence::render(&activity, from, to, status, DEFAULT_TOKEN_BUDGET);
@@ -622,6 +669,8 @@ mod tests {
                 }],
                 fail_with: None,
             }),
+            has_slack: true,
+            has_github: true,
             llm: Arc::new(llm(&server)),
         };
 
@@ -647,6 +696,8 @@ mod tests {
                 activity: Vec::new(),
                 fail_with: None,
             }),
+            has_slack: true,
+            has_github: true,
             llm: Arc::new(llm(&server)),
         };
 
@@ -664,6 +715,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_slack_outage_makes_a_partial_fire_not_a_silent_gap() {
+        // ADR-0007: partial is a real outcome, distinct from failed. The previous version
+        // returned on the first source error, so Partial was unreachable and a Slack
+        // outage produced a failed Fire plus a NO SIGNAL Draft indistinguishable from a
+        // genuinely quiet day — exactly what ADR-0002 forbids.
+        let conn = db();
+        let job_id = store::insert_job(&c(&conn), &job("Day Task")).unwrap();
+        let job = store::get_job(&c(&conn), job_id).unwrap();
+
+        let server = MockServer::start().await;
+        let runner = FireRunner {
+            source: Arc::new(FixedSource {
+                activity: vec![Activity::Slack {
+                    channel: "coot-ai".into(),
+                    message: slack_message(),
+                }],
+                fail_with: None,
+            }),
+            // GitHub configured, Slack not: exactly the partial case.
+            has_slack: false,
+            has_github: true,
+            llm: Arc::new(llm(&server)),
+        };
+
+        let at = Utc.with_ymd_and_hms(2026, 10, 2, 4, 5, 0).unwrap();
+        let fire = runner.fire(&conn, &job, at).await.unwrap().unwrap();
+
+        assert_eq!(
+            fire.outcome,
+            FireOutcome::Partial,
+            "a Fire missing one source is partial, not failed"
+        );
+        assert!(!fire.no_signal, "there was activity, so this is not a gap");
+
+        let draft = store::list_unapproved(&c(&conn)).unwrap();
+        assert_eq!(draft.len(), 1);
+        assert!(
+            draft[0].partial,
+            "the Draft records that a source was missing"
+        );
+    }
+
+    #[tokio::test]
     async fn a_collect_failure_records_a_failed_fire_with_the_reason() {
         let conn = db();
         let job_id = store::insert_job(&c(&conn), &job("Day Task")).unwrap();
@@ -675,6 +769,8 @@ mod tests {
                 activity: Vec::new(),
                 fail_with: Some("slack rejected the session (invalid_auth)".into()),
             }),
+            has_slack: true,
+            has_github: true,
             llm: Arc::new(llm(&server)),
         };
 
@@ -700,6 +796,8 @@ mod tests {
                 }],
                 fail_with: None,
             }),
+            has_slack: true,
+            has_github: true,
             llm: Arc::new(llm(&server)),
         };
 
@@ -774,6 +872,8 @@ mod tests {
                 }],
                 fail_with: None,
             }),
+            has_slack: true,
+            has_github: true,
             llm: Arc::new(llm(&server)),
         };
 
@@ -863,6 +963,8 @@ mod tests {
                 }],
                 fail_with: None,
             }),
+            has_slack: true,
+            has_github: true,
             llm: Arc::new(llm(&server)),
         };
 
@@ -890,6 +992,8 @@ mod tests {
                 activity: Vec::new(),
                 fail_with: None,
             }),
+            has_slack: true,
+            has_github: true,
             llm: Arc::new(llm(&server)),
         };
 
@@ -914,6 +1018,8 @@ mod tests {
                 activity: Vec::new(),
                 fail_with: None,
             }),
+            has_slack: true,
+            has_github: true,
             llm: Arc::new(llm(&server)),
         };
 
@@ -954,6 +1060,8 @@ mod tests {
                 }],
                 fail_with: None,
             }),
+            has_slack: true,
+            has_github: true,
             llm: Arc::new(llm(&server)),
         };
 
@@ -1002,6 +1110,8 @@ mod tests {
                 activity: Vec::new(),
                 fail_with: None,
             }),
+            has_slack: true,
+            has_github: true,
             llm: Arc::new(llm(&server)),
         };
 

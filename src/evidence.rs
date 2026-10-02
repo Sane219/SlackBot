@@ -251,13 +251,28 @@ pub fn render(
                 if body.is_empty() {
                     continue;
                 }
-                let when = g.created_at.format("%d %b %H:%M");
-                format!(
-                    "- {when} {code} {}/{} #{} {} {}",
-                    g.repo, "", g.number, g.title, body
-                )
-                .trim_end()
-                .to_string()
+                // `since` filters on updated_at, so a comment written weeks ago and edited
+                // today arrives here. Dating it by created_at put a line reading "28 Sep"
+                // under a header for 01–02 Oct, and sorted it to the bottom so it was the
+                // first thing the trim dropped. Date it by the edit when that is what
+                // brought it into the window.
+                let stamp = g.updated_at.max(g.created_at);
+                let edited = g.updated_at > g.created_at;
+                let base = stamp.format("%d %b %H:%M").to_string();
+                let when = if edited {
+                    format!("{base} (edited)")
+                } else {
+                    base
+                };
+                // Only the fields that are actually present. The fixed template had an
+                // empty segment, so every line rendered as "coot/ai/ #482".
+                let mut line = format!("- {when} {code} {}#{}", g.repo, g.number);
+                if !g.title.trim().is_empty() {
+                    let _ = write!(line, " {}", g.title.trim());
+                }
+                line.push(' ');
+                line.push_str(&body);
+                line.trim_end().to_string()
             }
         };
 
@@ -516,6 +531,60 @@ mod tests {
     }
 
     #[test]
+    fn a_github_line_has_no_empty_segments() {
+        // The old template emitted a fixed empty field, so every line ended "coot/ai/".
+        let (from, to) = window();
+        let activity = vec![Activity::Github(crate::github::GithubActivity {
+            repo: "coot/ai".into(),
+            number: 482,
+            kind: ActivityKind::ReviewComment,
+            title: String::new(),
+            body: "needs a rebase".into(),
+            created_at: at(10),
+            updated_at: at(10),
+        })];
+
+        let rendered = render(&activity, from, to, SourceStatus::both(), 4000);
+        let line = rendered
+            .text
+            .lines()
+            .find(|l| l.contains("PR"))
+            .unwrap_or_default();
+        assert!(!line.contains("coot/ai/"), "got: {line:?}");
+        assert!(line.contains("coot/ai#482"), "got: {line:?}");
+    }
+
+    #[test]
+    fn a_comment_surfaced_by_an_edit_is_dated_by_the_edit() {
+        // `since` matches updated_at, so an old comment edited today arrives in today's
+        // window. Dating it by created_at put a line from last month under a header for
+        // today, and sorted it to the bottom where the trim dropped it first.
+        let (from, to) = window();
+        let activity = vec![Activity::Github(crate::github::GithubActivity {
+            repo: "coot/ai".into(),
+            number: 9,
+            kind: ActivityKind::IssueComment,
+            title: "indexer".into(),
+            body: "reworded".into(),
+            created_at: at(0) - chrono::Duration::days(3),
+            updated_at: at(9),
+        })];
+
+        let rendered = render(&activity, from, to, SourceStatus::both(), 4000);
+        let line = rendered
+            .text
+            .lines()
+            .find(|l| l.contains("MSG"))
+            .unwrap_or_default();
+
+        assert!(line.contains("(edited)"), "got: {line:?}");
+        assert!(
+            !line.contains("29 Sep") && !line.contains("30 Sep"),
+            "an edited comment must not be dated outside the window: {line:?}"
+        );
+    }
+
+    #[test]
     fn github_activity_is_labelled_by_kind() {
         let (from, to) = window();
         let activity = vec![Activity::Github(crate::github::GithubActivity {
@@ -525,6 +594,7 @@ mod tests {
             title: "failover jitter".into(),
             body: "needs a rebase before merge\nmore detail".into(),
             created_at: at(10),
+            updated_at: at(10),
         })];
 
         let rendered = render(&activity, from, to, SourceStatus::both(), 4000);

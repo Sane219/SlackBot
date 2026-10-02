@@ -339,6 +339,36 @@ pub fn insert_draft(conn: &Connection, draft: &Draft) -> Result<i64> {
     Ok(conn.last_insert_rowid())
 }
 
+/// Replace a Draft's text *and* what it was drawn from.
+///
+/// Both, because the counts are the only record of where a Draft came from (ADR-0006).
+/// Updating the text alone left the UI describing the first render while showing the
+/// second, which is worse than no record at all.
+pub fn replace_draft(
+    conn: &Connection,
+    id: i64,
+    text: &str,
+    counts: &crate::domain::Counts,
+    no_signal: bool,
+    partial: bool,
+) -> Result<()> {
+    let changed = conn.execute(
+        "UPDATE drafts SET text = ?2, counts = ?3, no_signal = ?4, partial = ?5, edited = 1
+         WHERE id = ?1",
+        params![
+            id,
+            text,
+            serde_json::to_string(counts).map_err(sqlite_json_err)?,
+            no_signal as i64,
+            partial as i64,
+        ],
+    )?;
+    if changed == 0 {
+        return Err(StoreError::DraftNotFound(id));
+    }
+    Ok(())
+}
+
 pub fn update_draft_text(conn: &Connection, id: i64, text: &str) -> Result<()> {
     let changed = conn.execute(
         "UPDATE drafts SET text = ?2, edited = 1 WHERE id = ?1",
@@ -350,7 +380,37 @@ pub fn update_draft_text(conn: &Connection, id: i64, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Mark a Draft approved. The gate ADR-0001 depends on.
+/// Claim a Draft for sending, atomically.
+///
+/// Returns `false` when it was already claimed. The `WHERE approved = 0` is what makes
+/// this safe: two concurrent Approve requests race on it and exactly one sees a change,
+/// so the second refuses instead of posting a duplicate.
+///
+/// The claim happens *before* the Slack call, so it must be released on failure —
+/// `release_claim` puts the Draft back in the Inbox.
+pub fn claim_for_send(
+    conn: &Connection,
+    id: i64,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE drafts SET approved = 1, approved_at = ?2 WHERE id = ?1 AND approved = 0",
+        params![id, at.to_rfc3339()],
+    )?;
+    Ok(changed == 1)
+}
+
+/// Undo a claim, so a failed send leaves the Draft in the Inbox rather than silently
+/// consuming it.
+pub fn release_claim(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE drafts SET approved = 0, approved_at = NULL WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// Mark a Draft approved. Used by tests and by callers that already hold the claim.
 pub fn mark_approved(conn: &Connection, id: i64, at: chrono::DateTime<chrono::Utc>) -> Result<()> {
     let changed = conn.execute(
         "UPDATE drafts SET approved = 1, approved_at = ?2 WHERE id = ?1",
@@ -917,6 +977,37 @@ mod tests {
         let fire_cutoff = (Utc::now() - chrono::Duration::days(90)).to_rfc3339();
         let f = conn.execute("DELETE FROM fires WHERE fired_at < ?1 AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.fire_id = fires.id)", rusqlite::params![fire_cutoff]);
         println!("step2 fire delete: {f:?}");
+    }
+
+    #[test]
+    fn a_draft_can_only_be_claimed_once() {
+        // ADR-0001: two concurrent Approve requests must not both post. The claim is the
+        // serialisation point — without it, both read `approved = false`, both release
+        // the lock for the Slack call, and both post.
+        let conn = open_in_memory().unwrap();
+        let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        let id = insert_draft(&conn, &sample_draft(job_id, fire_id, "x")).unwrap();
+
+        assert!(claim_for_send(&conn, id, Utc::now()).unwrap());
+        assert!(
+            !claim_for_send(&conn, id, Utc::now()).unwrap(),
+            "a second claim must be refused"
+        );
+
+        // Releasing puts it back, so a failed send is recoverable.
+        release_claim(&conn, id).unwrap();
+        assert!(claim_for_send(&conn, id, Utc::now()).unwrap());
     }
 
     #[test]

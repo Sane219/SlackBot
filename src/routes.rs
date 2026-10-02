@@ -205,11 +205,26 @@ async fn save_credential(
 
     // The Slack cookie is passed exactly as the browser sent it. Decoding it is the most
     // likely way to break an otherwise-correct setup (ADR-0008).
-    if body.kind == SecretKind::SlackCookie && value.contains(' ') {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "paste the cookie value only, without the `d=` prefix or spaces".into(),
-        ));
+    // The message says "without the `d=` prefix" but the old guard only checked for a
+    // space, so `d=xoxd-…` was accepted, stored, and sent as `Cookie: d=d=xoxd-…`.
+    // ADR-0008 calls a mangled cookie the single most likely way to break a setup that
+    // otherwise looks correct.
+    if body.kind == SecretKind::SlackCookie {
+        if value.contains(' ') {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "paste the cookie value only, with no spaces".into(),
+            ));
+        }
+        if let Some(rest) = value.strip_prefix("d=") {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "paste the value only, without the `d=` prefix (it starts with {})",
+                    &rest.chars().take(8).collect::<String>()
+                ),
+            ));
+        }
     }
 
     state
@@ -781,6 +796,15 @@ async fn regenerate_draft(
 ) -> Result<Json<Draft>, ApiError> {
     reject_cross_origin(&headers)?;
     let draft = store::get_draft(&lock(&state), id)?;
+
+    // Regenerating an already-posted Draft would rewrite the record of what was sent.
+    if draft.approved {
+        return Err((
+            StatusCode::CONFLICT,
+            "this draft has already been sent, so its text is a record of what was posted".into(),
+        ));
+    }
+
     let runner = state.runner.as_ref().ok_or((
         StatusCode::PRECONDITION_FAILED,
         "no evidence source is configured".into(),
@@ -826,9 +850,17 @@ async fn regenerate_draft(
             .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
     };
 
-    // A regenerate replaces the text in place: a second row would leave the user
-    // choosing between two versions of the same Fire.
-    store::update_draft_text(&lock(&state), id, &text)?;
+    // A regenerate replaces the Draft in place: a second row would leave the user
+    // choosing between two versions of the same Fire. The counts go with the text, or
+    // the UI would describe the first render while showing the second.
+    store::replace_draft(
+        &lock(&state),
+        id,
+        &text,
+        &rendered.counts,
+        rendered.no_signal,
+        rendered.partial,
+    )?;
     Ok(Json(store::get_draft(&lock(&state), id)?))
 }
 
@@ -866,6 +898,17 @@ async fn approve(
         ));
     }
 
+    // Claim it before the Slack call. Reading `approved` and *then* posting was not
+    // atomic: two concurrent requests both saw false, both posted, and the user got two
+    // copies of the same message. The claim is released again if the send fails.
+    let claimed = store::claim_for_send(&lock(&state), id, now())?;
+    if !claimed {
+        return Err((
+            StatusCode::CONFLICT,
+            "this draft is already being sent".into(),
+        ));
+    }
+
     // An empty Draft means the model call failed. Approving it would post an empty
     // message, which is indistinguishable from a bug in the channel.
     if draft.text.trim().is_empty() {
@@ -895,20 +938,19 @@ async fn approve(
         "slack is not configured yet".into(),
     ))?;
 
-    let ts = slack
-        .post(&job.channel.id, &draft.text)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
-
-    // Marked approved only after Slack accepted it, so a failed post is not recorded as
-    // sent and cannot be silently retried into a duplicate.
-    store::mark_approved(&lock(&state), id, now())?;
-
-    Ok(Json(ApproveResult {
-        ok: true,
-        ts,
-        note: None,
-    }))
+    match slack.post(&job.channel.id, &draft.text).await {
+        Ok(ts) => Ok(Json(ApproveResult {
+            ok: true,
+            ts,
+            note: None,
+        })),
+        Err(err) => {
+            // The send failed, so the Draft goes back in the Inbox. Leaving it claimed
+            // would silently swallow a post the user never sent.
+            store::release_claim(&lock(&state), id)?;
+            Err((StatusCode::BAD_GATEWAY, err.to_string()))
+        }
+    }
 }
 
 /// Fire a Job immediately, for testing the whole path without waiting for the clock.
