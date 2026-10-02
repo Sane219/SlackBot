@@ -1,0 +1,22 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# Secrets — never commit. The LLM API key, Slack xoxc token and xoxd cookie
+# live in the OS keychain, not in files. These patterns are a second line of
+# defence in case a key ever lands on disk by accident.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local data
+*.db
+*.db-shm
+*.db-wal
+/skillsbot-data/
+
+# macOS
+.DS_Store
