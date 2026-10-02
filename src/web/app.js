@@ -384,6 +384,16 @@ function show(view) {
   const labels = { inbox: "Fire", jobs: "Job", setup: "Channel" };
   $("#spine-label").textContent = labels[view];
   $("#pane-title").textContent = view[0].toUpperCase() + view.slice(1);
+  renderWindowLabel();
+}
+
+/** The window describes a Draft, so it only means anything on the Inbox. */
+function renderWindowLabel() {
+  const label = $("#window-label");
+  const newest = state.drafts[0];
+  const show = state.view === "inbox" && newest;
+  label.hidden = !show;
+  label.textContent = show ? `${stamp(newest.window_from)} → ${stamp(newest.window_to)}` : "";
 }
 
 for (const tab of document.querySelectorAll(".tab")) {
@@ -458,10 +468,7 @@ async function refresh() {
   renderJobs();
   renderSetup();
 
-  const newest = state.drafts[0];
-  $("#window-label").textContent = newest
-    ? `${stamp(newest.window_from)} → ${stamp(newest.window_to)}`
-    : "";
+  renderWindowLabel();
   $("#spine-label").textContent = { inbox: "Fire", jobs: "Job", setup: "Channel" }[state.view];
 }
 

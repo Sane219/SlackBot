@@ -23,6 +23,31 @@ against a measured pixel target.
 To make this surface comp-led later: set `OPENAI_API_KEY`, then re-run
 `impeccable build-phase advance`.
 
+## Rendered in a browser
+
+The comp round could not run (no image generator), but the surface was rendered and
+inspected in headless Chrome at 1440x900 and 390x844, on every tab, with the
+screenshots in `.impeccable/review/`.
+
+What rendering found that reading the code did not:
+
+- **Every view rendered at once.** `.view { display: flex }` beat the `hidden`
+  attribute's UA `display: none`, so the Jobs and Setup panels sat below the Inbox.
+  The DOM probe reported `hidden` as set and said everything was fine.
+- **A Fire's error reason was clipped** mid-word inside the 180px spine — the one text
+  a user needs when something is wrong.
+- **Save and Verify wrapped under the field** instead of beside it, because the action
+  column was 7rem and had to hold a mark plus two buttons.
+- **The window label showed a Draft's window on the Setup board**, because only the
+  20s poll updated it and a tab click did not.
+- **A 404 for favicon.ico** was the sole console error on a clean load.
+
+Console is now clean at both widths: no errors, no failed requests, no page errors.
+Every tab stop is visible with a focus ring, and the accessibility tree builds.
+
+Still unverified: the visual world has never been checked against a comp, because no
+comp exists. The layout is measured against the direction contract, not against pixels.
+
 ## Detector: one advisory deliberately kept
 
 `impeccable detect` reports `repeating-stripes-gradient` on the hatch fill. That
