@@ -1,0 +1,63 @@
+<!doctype html>
+<!--
+  Served only when `dist/` was not built. The API is running; the page is not. Saying so
+  beats a blank screen, and beats a compile error that would stop `cargo run` working.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SlackBot — UI not built</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 3rem 1.5rem;
+        background: #0a0b0d;
+        color: #e6eaef;
+        font-family: "Roboto Condensed", "Helvetica Neue", Arial, sans-serif;
+        font-size: 15px;
+        line-height: 1.5;
+      }
+      main {
+        max-width: 44rem;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        border-bottom: 2px solid #1b3a3f;
+        padding-bottom: 0.75rem;
+      }
+      pre {
+        background: #101216;
+        border: 1px solid #14282c;
+        border-left: 2px solid #ffb020;
+        padding: 0.9rem 1.1rem;
+        overflow-x: auto;
+      }
+      code {
+        font-family: inherit;
+      }
+      p {
+        color: #a8b1ba;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>The UI has not been built</h1>
+      <p>
+        The server is running and the API is live. This page is what the binary embeds
+        when <code>dist/</code> is missing or empty.
+      </p>
+      <p>Build it once:</p>
+      <pre><code>npm --prefix ui install
+npm --prefix ui run build</code></pre>
+      <p>
+        <code>dist/</code> is committed to this repository, so anyone who cloned it
+        already has it. A build that wiped it is the likely cause — see ADR-0009.
+      </p>
+    </main>
+  </body>
+</html>

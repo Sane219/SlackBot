@@ -902,17 +902,6 @@ async fn approve(
         ));
     }
 
-    // Claim it before the Slack call. Reading `approved` and *then* posting was not
-    // atomic: two concurrent requests both saw false, both posted, and the user got two
-    // copies of the same message. The claim is released again if the send fails.
-    let claimed = store::claim_for_send(&lock(&state), id, now())?;
-    if !claimed {
-        return Err((
-            StatusCode::CONFLICT,
-            "this draft is already being sent".into(),
-        ));
-    }
-
     // An empty Draft means the model call failed. Approving it would post an empty
     // message, which is indistinguishable from a bug in the channel.
     if draft.text.trim().is_empty() {
@@ -936,11 +925,28 @@ async fn approve(
         }));
     }
 
-    let job = store::get_job(&lock(&state), draft.job_id)?;
+    // Checked *before* the claim. This used to come after it, and a 412 here returned
+    // without releasing: the Draft stayed marked approved, vanished from the Inbox, and
+    // could never be sent. Approving once before Slack was configured silently destroyed
+    // a drafted post, and `approved_at` said it had been sent.
     let slack = state.slack.as_ref().ok_or((
         StatusCode::PRECONDITION_FAILED,
         "slack is not configured yet".into(),
     ))?;
+
+    // Claim it before the Slack call. Reading `approved` and *then* posting was not
+    // atomic: two concurrent requests both saw false, both posted, and the user got two
+    // copies of the same message. The claim is the only step after this that can leave
+    // state changed, and the one that can fail — the Slack send — releases it.
+    let claimed = store::claim_for_send(&lock(&state), id, now())?;
+    if !claimed {
+        return Err((
+            StatusCode::CONFLICT,
+            "this draft is already being sent".into(),
+        ));
+    }
+
+    let job = store::get_job(&lock(&state), draft.job_id)?;
 
     match slack.post(&job.channel.id, &draft.text).await {
         Ok(ts) => Ok(Json(ApproveResult {

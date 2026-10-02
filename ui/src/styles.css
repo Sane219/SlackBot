@@ -1,0 +1,945 @@
+/* Incident postmortem wall.
+   One pen, one type size, honest voids. Rank is carried by weight and rule only.
+   Vermilion is reserved for a Fire that failed; it appears nowhere else. */
+
+:root {
+  /* Ground and rule */
+  --wall: #0a0b0d;
+  --wall-raised: #101216;
+  --grid: #1b3a3f;
+  --grid-soft: #14282c;
+
+  /* Ink. Every value below is checked against --wall or --wall-raised for WCAG AA;
+     the earlier dimmer tones failed at 3.1:1 and were raised. */
+  --carbon: #e6eaef;
+  --carbon-dim: #a8b1ba;
+  --carbon-faint: #7d868f;
+
+  /* The one pen, and the one alarm. --signal-dim is the traced-but-quiet tone and
+     must still clear 4.5:1; the hatch fill uses it decoratively, but the NO SIGNAL
+     label is text and cannot. */
+  --signal: #ffb020;
+  --signal-dim: #c2830f;
+  --sev1: #ff5f57;
+
+  /* One size. Rank comes from weight and rule, never a second size. */
+  --face: "Roboto Condensed", "Archivo Narrow", "Helvetica Neue", Arial, sans-serif;
+  --size: 15px;
+  --leading: 1.5;
+  /* The label size. The One Size Rule permits exactly two: this and the body. */
+  --label: 0.78em;
+
+  --gutter: 180px;
+  --rule: 1px solid var(--grid-soft);
+  --rule-strong: 2px solid var(--grid);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  /* An operations board is read, not browsed. */
+  background: var(--wall);
+}
+
+body {
+  margin: 0;
+  background: var(--wall);
+  color: var(--carbon);
+  font-family: var(--face);
+  font-size: var(--size);
+  line-height: var(--leading);
+  font-stretch: condensed;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Focus must be visible on a near-black board with one accent colour. */
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+code {
+  font-family: var(--face);
+  color: var(--carbon);
+}
+
+/* ── Board ───────────────────────────────────────────────────────────────── */
+
+.board {
+  display: grid;
+  grid-template-columns: var(--gutter) 1fr;
+  min-height: 100vh;
+}
+
+.pane {
+  padding: 1.75rem 2.25rem 2.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  min-width: 0;
+}
+
+.pane__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1.5rem;
+  border-bottom: var(--rule-strong);
+  padding-bottom: 0.75rem;
+}
+
+.pane__title {
+  margin: 0;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+/* Window as an edge scale — the lexicon's guide words, made instrumental. */
+.window {
+  font-variant-numeric: tabular-nums;
+  color: var(--carbon-dim);
+  border-left: var(--rule-strong);
+  padding-left: 0.75rem;
+}
+
+.colophon {
+  border-top: var(--rule);
+  padding-top: 0.75rem;
+  font-size: var(--label);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--carbon-faint);
+}
+
+/*
+ * The floating Setup control.
+ *
+ * Fixed to the bottom-left, which on the wide board lands inside the 180px spine and on
+ * the narrow one over the pane's bottom padding — the one corner no view puts content in.
+ * A button, not a badge: it is the only control that resolves a dead Slack session, so
+ * it has to be a real tab stop with a real label.
+ *
+ * It carries the pen when something needs attention, which is the same rule as every
+ * other amber mark: the one thing the user is expected to act on.
+ */
+.setup-float {
+  /*
+   * Fixed, so it is an overlay — but it must never sit on text the user came to read.
+   * On the wide board it lives inside the 180px spine, which holds only the Fire rows,
+   * and the spine is given bottom padding so the last row clears it. On a narrow board
+   * the spine is a full-width band above the pane, so there is no gutter to sit in; the
+   * pane carries the clearance instead. Measured by ui/float-overlap.mjs.
+   */
+  position: fixed;
+  left: 0.75rem;
+  bottom: 0.75rem;
+  z-index: 10;
+  font-family: inherit;
+  font-size: var(--label);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  padding: 0.5rem 0.9rem;
+  background: var(--wall-raised);
+  border: var(--rule-strong);
+  color: var(--carbon-dim);
+  cursor: pointer;
+}
+
+.setup-float:hover {
+  color: var(--carbon);
+  border-color: var(--carbon-dim);
+}
+
+.setup-float--attention {
+  border-color: var(--signal);
+  color: var(--signal);
+  font-weight: 700;
+}
+
+/* ── Timeline spine ────────────────────────────────────────────────────── */
+
+.spine {
+  border-right: var(--rule);
+  background: var(--wall-raised);
+  /* Bottom clearance for the floating Setup button, which sits in this column. */
+  padding: 1.75rem 0 4rem;
+}
+
+.spine__label {
+  font-size: var(--label);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--carbon-faint);
+  padding: 0 1rem 1rem;
+  border-bottom: var(--rule);
+}
+
+.fire {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr;
+  padding: 0.9rem 1rem 0.9rem 1.1rem;
+  border-bottom: var(--rule);
+}
+
+.fire__clock {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  color: var(--carbon-dim);
+}
+
+.fire__name {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--carbon);
+}
+
+.fire__code {
+  font-size: var(--label);
+  letter-spacing: 0.16em;
+  color: var(--carbon-faint);
+  /* An error reason is longer than a code. Without this it was clipped mid-word inside
+     the 180px spine, which is exactly the text a user needs to read. */
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
+/* The status rule is one continuous line down the spine rather than a left tab per
+   card: a strip that reads as a card accent is the generic pattern, and a strip that
+   reads as a chart trace is the incident board. */
+.fire__rule {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: transparent;
+}
+
+/* A Fire that collected Evidence carries the pen's colour on its rule. */
+.fire--traced .fire__rule {
+  background: var(--signal);
+}
+
+/* A failed Fire. The only place vermilion is permitted. */
+.fire--failed .fire__rule {
+  background: var(--sev1);
+}
+
+.fire--failed .fire__code {
+  color: var(--sev1);
+  font-weight: 700;
+}
+
+/* The memorable moment: a gap is drawn as a gap. */
+.fire--nosignal .fire__name {
+  color: var(--signal-dim);
+  font-weight: 400;
+}
+
+/* What is coming. Quiet on purpose — it has not collected anything yet, so amber on it
+   would dilute the mark that means a Fire actually happened. The rule is the grid, not
+   the pen. */
+.fire--next .fire__rule {
+  background: var(--grid);
+}
+
+.fire--next .fire__name {
+  color: var(--carbon-dim);
+}
+
+/* Hatched void. Not an empty card, not a hedge. */
+.hatch {
+  height: 3px;
+  margin-top: 0.55rem;
+  border-radius: 1px;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--signal-dim) 0 2px,
+    transparent 2px 5px
+  );
+}
+
+/* ── Tabs ────────────────────────────────────────────────────────────────── */
+
+.tabs {
+  display: flex;
+  gap: 1.25rem;
+  border-bottom: var(--rule);
+}
+
+.tab {
+  font-family: inherit;
+  font-size: var(--label);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--carbon-faint);
+  padding: 0 0 0.5rem;
+  cursor: pointer;
+}
+
+.tab[aria-selected="true"] {
+  color: var(--signal);
+  border-bottom-color: var(--signal);
+}
+
+/* The waiting count. Carbon, not amber: it is a number, not a mark that something was
+   collected, and the pen is already spoken for. */
+.tab__n {
+  margin-left: 0.5rem;
+  color: var(--carbon);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-height: 0;
+}
+
+/* `display: flex` on a class beats the `hidden` attribute's UA `display: none`, so every
+   view rendered at once. Verified in a browser, not by reading the CSS. */
+.view[hidden] {
+  display: none;
+}
+
+/* ── A Draft in the Inbox ────────────────────────────────────────────────── */
+
+.draft-card {
+  border: var(--rule-strong);
+  padding: 1.1rem 1.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  background: var(--wall-raised);
+}
+
+.draft-card__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: var(--rule);
+  padding-bottom: 0.55rem;
+}
+
+.draft-card__name {
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.draft-card__body {
+  white-space: pre-wrap;
+  min-height: 3.5rem;
+  overflow-wrap: anywhere;
+}
+
+.draft-card__edit {
+  min-height: 8rem;
+}
+
+/* The gap is stated in words, not by tinting the box. */
+.draft-card--nosignal .draft-card__body {
+  color: var(--signal-dim);
+  letter-spacing: 0.16em;
+  font-weight: 700;
+  border-left: 2px solid var(--signal-dim);
+  padding-left: 0.7rem;
+}
+
+/* Source counts in code, never in prose. State speaks in code. */
+.counts {
+  display: flex;
+  gap: 1.2rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding: 0.65rem 0;
+  border-bottom: var(--rule);
+  color: var(--carbon-dim);
+}
+
+.count {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+}
+
+.count__code {
+  font-size: var(--label);
+  letter-spacing: 0.16em;
+  color: var(--carbon-faint);
+}
+
+.count__n {
+  font-variant-numeric: tabular-nums;
+  color: var(--signal);
+  font-weight: 700;
+}
+
+/* Truncation says so in the margin. Show the grain. */
+.grain {
+  color: var(--carbon-faint);
+  letter-spacing: 0.16em;
+  font-size: var(--label);
+  border-left: var(--rule);
+  padding-left: 0.6rem;
+  text-transform: uppercase;
+}
+
+/* Evidence, one click away. It is the only way to tell a good draft from a plausible
+   one, so it sits under the text rather than behind a navigation. */
+.disclosure {
+  align-self: flex-start;
+  font-family: inherit;
+  font-size: var(--label);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  background: none;
+  border: 0;
+  border-bottom: var(--rule-strong);
+  color: var(--carbon-dim);
+  padding: 0 0 0.3rem;
+  cursor: pointer;
+}
+
+.disclosure:hover {
+  color: var(--carbon);
+}
+
+.disclosure__n {
+  color: var(--carbon-faint);
+  letter-spacing: 0.04em;
+}
+
+.evidence {
+  border: var(--rule);
+  border-left: 2px solid var(--grid);
+  padding: 0.9rem 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  color: var(--carbon-dim);
+}
+
+.evidence__line {
+  font-variant-numeric: tabular-nums;
+}
+
+.evidence__line strong {
+  color: var(--carbon);
+  font-weight: 700;
+}
+
+.evidence__note {
+  margin: 0;
+  color: var(--carbon-faint);
+}
+
+.empty {
+  color: var(--carbon-faint);
+  letter-spacing: 0.04em;
+  border: var(--rule);
+  border-left: 2px solid var(--grid);
+  padding: 1.2rem 1.3rem;
+}
+
+/* ── Action row ────────────────────────────────────────────────────────── */
+
+/* Approve and Discard are separated by a full rule, never adjacent. */
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  border-top: var(--rule-strong);
+  padding-top: 1.1rem;
+}
+
+.actions__gap {
+  flex: 1;
+  border-top: var(--rule);
+}
+
+.btn {
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding: 0.6rem 1.4rem;
+  border: var(--rule-strong);
+  background: transparent;
+  color: var(--carbon);
+  cursor: pointer;
+}
+
+.btn:disabled {
+  color: var(--carbon-faint);
+  border-color: var(--grid-soft);
+  cursor: progress;
+}
+
+.btn--approve {
+  border-color: var(--signal);
+  color: var(--signal);
+  font-weight: 700;
+}
+
+.btn--approve:hover:not(:disabled) {
+  background: var(--signal);
+  color: var(--wall);
+}
+
+.btn--secondary {
+  color: var(--carbon-dim);
+}
+
+.btn--secondary:hover:not(:disabled) {
+  color: var(--carbon);
+  border-color: var(--carbon-dim);
+}
+
+/* A button that reads as a link, for "reconnect Slack" inside a banner. It stays a real
+   button so it is reachable and announces itself as one. */
+.linkish {
+  font-family: inherit;
+  font-size: inherit;
+  background: none;
+  border: 0;
+  border-bottom: var(--rule-strong);
+  color: var(--signal);
+  padding: 0 0 0.15rem;
+  cursor: pointer;
+}
+
+/* ── Banners ─────────────────────────────────────────────────────────────── */
+
+/* Failure is the only thing with a vermilion outline, and it is only that when the
+   thing that failed is a Fire. A rejected edit is not a Fire, so it gets a rule. */
+.banner {
+  border: var(--rule-strong);
+  padding: 0.85rem 1.1rem;
+  color: var(--carbon);
+  overflow-wrap: anywhere;
+}
+
+.banner--sev1 {
+  box-shadow: inset 0 0 0 1px var(--sev1);
+}
+
+/* Stays up until the cause is fixed. A problem that does not fix itself should not be a
+   toast the user can miss. */
+.banner--sticky {
+  background: var(--wall-raised);
+}
+
+/* ── Setup: the same board, one column ─────────────────────────────────── */
+
+.steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  border-top: var(--rule);
+}
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 1.25rem;
+}
+
+/* A rule that fills, not a filled bar. At full width and two pixels tall it is a mark,
+   not a wash of the pen. */
+.progress__bar {
+  height: 2px;
+  background: var(--grid-soft);
+}
+
+.progress__fill {
+  height: 100%;
+  background: var(--signal);
+  transition: width 160ms linear;
+}
+
+.progress__label {
+  font-size: var(--label);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--carbon-dim);
+}
+
+.step-group {
+  border-bottom: var(--rule);
+  padding: 1.1rem 0;
+}
+
+.step-group__title {
+  margin: 0 0 0.35rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+}
+
+.step-group__n {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: var(--rule-strong);
+  font-size: var(--label);
+  letter-spacing: 0.16em;
+  color: var(--carbon-faint);
+}
+
+.step {
+  display: grid;
+  grid-template-columns: var(--gutter) 1fr;
+  border-bottom: var(--rule);
+}
+
+.jobs > .job {
+  border-bottom: var(--rule);
+}
+
+.step__code {
+  padding: 1.1rem 1rem;
+  border-right: var(--rule);
+  color: var(--carbon-faint);
+  letter-spacing: 0.16em;
+  font-size: var(--label);
+}
+
+.step__body {
+  padding: 1.1rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.step__label {
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.step__note {
+  color: var(--carbon-dim);
+}
+
+.step__note--done {
+  color: var(--carbon);
+  font-weight: 700;
+  padding-top: 0.9rem;
+}
+
+/* An error is named, not tinted. Vermilion would spend the one colour that means a Fire
+   failed on a mistyped timezone. */
+.step__error {
+  color: var(--carbon);
+  font-weight: 700;
+  border-left: 2px solid var(--carbon-dim);
+  padding-left: 0.6rem;
+}
+
+.step__mark {
+  font-size: var(--label);
+  letter-spacing: 0.16em;
+  color: var(--signal);
+}
+
+.step__mark--pending {
+  color: var(--carbon-faint);
+}
+
+.step__mark--failed {
+  color: var(--carbon);
+}
+
+/* A credential row: label, field, and the state of it. */
+.step__row {
+  display: grid;
+  grid-template-columns: 9rem minmax(0, 22rem) auto;
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.7rem 0;
+}
+
+.step__row + .step__row {
+  border-top: var(--rule);
+}
+
+.step__row .btn {
+  padding: 0.5rem 0.9rem;
+}
+
+.step__actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* ── Fields ──────────────────────────────────────────────────────────────── */
+
+input[type="text"],
+input[type="password"],
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+  background: var(--wall);
+  border: var(--rule);
+  color: var(--carbon);
+  padding: 0.55rem 0.7rem;
+  width: 100%;
+  line-height: 1.5;
+}
+
+textarea {
+  padding: 0.7rem 0.8rem;
+  max-width: 44rem;
+  resize: vertical;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--carbon-faint);
+}
+
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  border-color: var(--signal);
+}
+
+/* Native option lists are OS-drawn and light; leaving them alone is honest, but the
+   closed control has to match the rest of the board. */
+select {
+  appearance: none;
+  border-right: var(--rule-strong);
+  padding-right: 1.6rem;
+}
+
+.field--time {
+  max-width: 7rem;
+}
+
+.field--code {
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.checkline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--carbon-dim);
+}
+
+.checkline input {
+  accent-color: var(--signal);
+  width: 1rem;
+  height: 1rem;
+}
+
+/* ── The planner ─────────────────────────────────────────────────────────── */
+
+.plan,
+.manual {
+  border: var(--rule);
+  border-left: var(--rule-strong);
+  padding: 1.1rem 1.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.plan .actions,
+.manual .actions {
+  border-top: var(--rule);
+  padding-top: 0.85rem;
+  margin-top: 0.2rem;
+}
+
+.proposals {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin-top: 0.4rem;
+}
+
+.proposal {
+  border: var(--rule);
+  padding: 0.85rem 1rem;
+  background: var(--wall-raised);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+/* Every proposed field is editable. The model proposes; it never gates. */
+.proposal__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.7rem;
+}
+
+.proposal__grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.proposal__grid label > span {
+  font-size: var(--label);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--carbon-faint);
+}
+
+.proposal__wide {
+  grid-column: 1 / -1;
+}
+
+.proposal__hint {
+  font-size: var(--label);
+  letter-spacing: 0.04em;
+  color: var(--carbon-dim);
+  border-left: var(--rule);
+  padding-left: 0.6rem;
+}
+
+/* ── Jobs ────────────────────────────────────────────────────────────────── */
+
+.jobs {
+  display: flex;
+  flex-direction: column;
+  border-top: var(--rule);
+}
+
+/*
+ * Three columns: the ON/OFF code, the Job, and the actions.
+ *
+ * Two columns put the actions on the next row's first cell — the 180px spine gutter —
+ * where "Run it now" wrapped to RUN / IT / NOW across three lines.
+ */
+.job {
+  grid-template-columns: var(--gutter) 1fr auto;
+  align-items: center;
+}
+
+.job .step__body {
+  padding: 0.9rem 0;
+  gap: 0.25rem;
+}
+
+.job .step__code {
+  border-right: var(--rule);
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  padding: 0 1rem;
+}
+
+/* A button that breaks mid-phrase is worse than a wide one. */
+.job .btn {
+  white-space: nowrap;
+  padding: 0.5rem 0.9rem;
+}
+
+/* ── Screen-reader only ──────────────────────────────────────────────────── */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Narrow ──────────────────────────────────────────────────────────────── */
+
+@media (max-width: 860px) {
+  .board {
+    grid-template-columns: 1fr;
+  }
+
+  /* Stacked, the spine becomes a full-width band and the pane's own window label
+     duplicates the one on the Draft card directly below it. */
+  .pane__head .window {
+    display: none;
+  }
+
+  .spine {
+    border-right: 0;
+    border-bottom: var(--rule-strong);
+  }
+
+  .fire {
+    grid-template-columns: 5.5rem 1fr auto;
+    gap: 0.75rem;
+    align-items: baseline;
+  }
+
+  .hatch {
+    display: none;
+  }
+
+  .step {
+    grid-template-columns: 1fr;
+  }
+
+  .step__code {
+    border-right: 0;
+    border-bottom: var(--rule);
+    padding-bottom: 0.5rem;
+  }
+
+  /* Three columns at 390px put each at ~110px, which wraps the buttons under the
+     field and leaves the mark on a line of its own. */
+  .step__row {
+    grid-template-columns: 1fr;
+  }
+
+  /* Same reason: the actions column has nowhere to go but under the label. */
+  .job {
+    grid-template-columns: 1fr;
+  }
+
+  .job .step__code {
+    border-right: 0;
+    border-bottom: var(--rule);
+    padding: 0.5rem 0;
+    align-self: auto;
+  }
+
+  /* Stacked, the spine becomes a full-width band above the pane, so the floating Setup
+     button has no gutter to sit in and the pane carries the clearance. */
+  .pane {
+    padding: 1.25rem 1.25rem 4rem;
+  }
+
+  .spine {
+    padding-bottom: 1.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

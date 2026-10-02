@@ -34,6 +34,38 @@ The live design was worked as a wayfinding map at
 those terms. The tool imposes no names or shapes for a team's status messages
 (ADR-0004) — those are learned per user and stored per Job.
 
+## Before changing the UI
+
+`ui/` is a React app built by Vite to `dist/`, which is **committed** and embedded in
+the binary by `build.rs`. So a UI change is two commands:
+
+```sh
+npm --prefix ui install && npm --prefix ui run build   # after changing ui/src
+cargo build                                           # or cargo run
+```
+
+Skipping the `cargo build` serves the *previous* UI: `include_str!` reads `dist/` at
+compile time. CI fails a pull request whose `dist/` does not match its sources.
+
+Verify in a real browser, against a server on `:7321`:
+
+```sh
+scripts/seed-demo-db.sh "$SLACKBOT_DATA_DIR/slackbot.db"   # throwaway data to look at
+node ui/verify.mjs        # 34 assertions at 1440 / 1024 / 390
+node ui/shot.mjs label --tab=jobs --w=390 --h=844 --full
+```
+
+**Screenshots, not DOM assertions.** A probe once reported `hidden` as set correctly
+while the element was plainly on screen, because a class's `display: flex` beat the
+attribute. Compute styles and pixels, and only pixels settle it.
+
+Two traps in this codebase that have each cost real time, both now pinned by tests:
+
+- A missing `#[serde(default)]` turns a partial request body into a 422 before any
+  validation runs. Three separate bugs were this one.
+- `rusqlite::Error::InvalidQuery` renders as **"Query is not read-only"**. It is never a
+  permission problem; it is always a value this code could not decode.
+
 ## Agent skills
 
 ### Issue tracker

@@ -21,39 +21,53 @@ use secrets::{KeychainStore, PresentCredentials, SecretKind};
 /// enough that a due Job fires close to on time.
 const TICK: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Static assets, embedded at compile time.
+// Every file in the built UI, embedded at compile time by `build.rs`.
+//
+// Embedded rather than read from disk so `cargo run` works from any working directory
+// and the binary needs nothing beside it — no Node, no `ui/`, no `dist/`.
+include!(concat!(env!("OUT_DIR"), "/assets.rs"));
+
+/// Content type by extension.
 ///
-/// Embedded rather than read from disk so `cargo run` works from any working directory
-/// and the binary needs nothing beside it.
-const INDEX_HTML: &str = include_str!("web/index.html");
-const APP_CSS: &str = include_str!("web/app.css");
-const APP_JS: &str = include_str!("web/app.js");
+/// Vite emits exactly three kinds of file (plus sourcemaps, which the browser fetches
+/// only when devtools are open). An unknown extension gets `application/octet-stream`,
+/// which is correct if unhelpful — and there is no correct alternative worth a lookup
+/// table of its own.
+fn content_type(path: &str) -> &'static str {
+    match path.rsplit_once('.').map(|(_, ext)| ext) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json" | "map") => "application/json; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("png") => "image/png",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
+}
 
 fn assets() -> axum::Router {
-    use axum::{http::header, routing::get};
-    axum::Router::new()
-        .route(
-            "/",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-                    INDEX_HTML,
-                )
-            }),
-        )
-        .route(
-            "/app.css",
-            get(|| async { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], APP_CSS) }),
-        )
-        .route(
-            "/app.js",
-            get(|| async {
-                (
-                    [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                    APP_JS,
-                )
-            }),
-        )
+    use axum::{http::header, http::StatusCode, response::IntoResponse, routing::get};
+
+    // `fallback` covers every path and every method, so one handler serves the whole tree.
+    axum::Router::new().fallback(get(|req: axum::extract::Request| async move {
+        // The path is all an asset's identity depends on; a cache-busting query is not
+        // part of it. `/` is the one alias, because `dist/` holds a file called
+        // `index.html` and no file called ``.
+        let path = req.uri().path();
+        let wanted = if path == "/" { "/index.html" } else { path };
+
+        match ASSETS.iter().find(|(url, _)| *url == wanted) {
+            Some((_, body)) => {
+                ([(header::CONTENT_TYPE, content_type(wanted))], *body).into_response()
+            }
+            // A miss gets a real 404 rather than the index page. Serving `index.html`
+            // for a missing asset would turn a stale `dist/` into a blank screen with no
+            // error anywhere.
+            None => (StatusCode::NOT_FOUND, "not found").into_response(),
+        }
+    }))
 }
 
 /// Build the LLM client from the saved settings and the keychain, if both exist.

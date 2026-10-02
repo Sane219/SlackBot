@@ -17,15 +17,70 @@ pub enum StoreError {
     DraftNotFound(i64),
     #[error("fire {0} not found")]
     FireNotFound(i64),
-    #[error("could not decode stored {what}: {source}")]
+    #[error("could not decode stored {what}")]
     Decode {
-        what: &'static str,
+        what: String,
         #[source]
         source: rusqlite::Error,
     },
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
+
+/// How much of a bad stored value to quote back. Enough to see the shape, not enough to
+/// paste a whole Draft into an error string.
+const SAMPLE: usize = 60;
+
+/// Name a stored value that would not decode, and show a piece of it.
+///
+/// This used to map every decode failure to `rusqlite::Error::InvalidQuery`, which
+/// renders as **"Query is not read-only"** — a description of an entirely different
+/// failure. A row this code had not written was reported as a database problem, and the
+/// actual cause (a bare `drafted` where the column holds JSON) had to be found by
+/// guessing. An error that lies about its own cause is worse than no error: it sends the
+/// hunt to the wrong file.
+fn undecodable(
+    column: &str,
+    raw: &str,
+    source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+) -> StoreError {
+    let sample: String = raw.chars().take(SAMPLE).collect();
+    let elided = if sample.chars().count() < raw.chars().count() {
+        "…"
+    } else {
+        ""
+    };
+    StoreError::Decode {
+        what: format!("{column} = {sample:?}{elided}"),
+        source: rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            source.into(),
+        ),
+    }
+}
+
+/// Decode a stored JSON column.
+fn decode_json<T: serde::de::DeserializeOwned>(column: &str, raw: &str) -> Result<T> {
+    serde_json::from_str(raw).map_err(|e| undecodable(column, raw, e))
+}
+
+/// Parse a stored RFC 3339 timestamp.
+///
+/// A bad one is an error, never `None`. `None` means *never fired*, and a row that
+/// silently becomes that tells the scheduler a Job is overdue when it is not.
+fn decode_time(column: &str, raw: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    raw.parse()
+        .map_err(|e: chrono::ParseError| undecodable(column, raw, e))
+}
+
+/// Parse a stored timestamp that is allowed to be absent.
+fn decode_optional_time(
+    column: &str,
+    raw: Option<String>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    raw.map(|s| decode_time(column, &s)).transpose()
+}
 
 /// Open and migrate a connection.
 pub fn open(path: &std::path::Path) -> Result<Connection> {
@@ -185,17 +240,15 @@ pub fn list_jobs(conn: &Connection) -> Result<Vec<Job>> {
                 Ok(Job {
                     id,
                     name,
-                    schedule: serde_json::from_str(&schedule)
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    schedule: decode_json("jobs.schedule", &schedule)?,
                     channel: ChannelRef {
                         id: cid,
                         name: cname,
                     },
-                    context_window: serde_json::from_str(&window)
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    context_window: decode_json("jobs.context_window", &window)?,
                     prompt_template: template,
                     enabled: enabled != 0,
-                    last_fired_at: last_fired.and_then(|s| s.parse().ok()),
+                    last_fired_at: decode_optional_time("jobs.last_fired_at", last_fired)?,
                 })
             },
         )
@@ -290,11 +343,8 @@ pub fn list_fires(conn: &Connection, limit: i64) -> Result<Vec<Fire>> {
             Ok(Fire {
                 id,
                 job_id,
-                fired_at: fired_at
-                    .parse()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
-                outcome: serde_json::from_str(&outcome)
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                fired_at: decode_time("fires.fired_at", &fired_at)?,
+                outcome: decode_json("fires.outcome", &outcome)?,
                 no_signal: no_signal != 0,
                 error,
             })
@@ -506,17 +556,16 @@ pub fn list_drafts(conn: &Connection) -> Result<Vec<Draft>> {
                     job_id,
                     fire_id,
                     text,
-                    window_from: from.parse().map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    window_to: to.parse().map_err(|_| rusqlite::Error::InvalidQuery)?,
-                    counts: serde_json::from_str(&counts)
-                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    window_from: decode_time("drafts.window_from", &from)?,
+                    window_to: decode_time("drafts.window_to", &to)?,
+                    counts: decode_json("drafts.counts", &counts)?,
                     no_signal: no_signal != 0,
                     partial: partial != 0,
                     parent_id: parent,
-                    created_at: created.parse().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    created_at: decode_time("drafts.created_at", &created)?,
                     edited: edited != 0,
                     approved: approved != 0,
-                    approved_at: approved_at.and_then(|s| s.parse().ok()),
+                    approved_at: decode_optional_time("drafts.approved_at", approved_at)?,
                     discarded: discarded != 0,
                 })
             },
@@ -1105,5 +1154,87 @@ mod tests {
 
         assert!(list_fires(&conn, 10).unwrap().is_empty());
         assert!(list_drafts(&conn).unwrap().is_empty());
+    }
+    /// A stored value this code cannot decode must say which column and what it found.
+    ///
+    /// These all used to collapse into `rusqlite::Error::InvalidQuery`, whose Display is
+    /// **"Query is not read-only"** — so a bad row in `fires.outcome` was reported as a
+    /// database permission problem. The message sent the investigation to the wrong file
+    /// entirely, which is how a bare `drafted` (not valid JSON) spent an afternoon.
+    #[test]
+    fn a_bad_stored_value_names_its_column() {
+        let conn = open_in_memory().unwrap();
+        let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
+        record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+
+        // `fires.outcome` holds JSON, because `record_fire` writes `serde_json::to_string`.
+        // A bare word is what a hand-edited row, or an older build, looks like.
+        conn.execute("UPDATE fires SET outcome = 'drafted'", [])
+            .unwrap();
+        let text = list_fires(&conn, 10).unwrap_err().to_string();
+        assert!(text.contains("fires.outcome"), "no column named in: {text}");
+        assert!(text.contains("drafted"), "no offending value shown: {text}");
+        assert!(
+            !text.contains("read-only"),
+            "the error still describes a permission problem: {text}"
+        );
+
+        // The stored form round-trips, so the check above is about the message, not about
+        // rejecting a shape the writer actually produces.
+        conn.execute("UPDATE fires SET outcome = '\"drafted\"'", [])
+            .unwrap();
+        assert_eq!(list_fires(&conn, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_bad_stored_timestamp_is_an_error_not_a_never_fired_job() {
+        let conn = open_in_memory().unwrap();
+        insert_job(&conn, &sample_job("Day Task")).unwrap();
+
+        // `last_fired_at` used to parse with `.ok()`, which turned an unparseable value
+        // into `None` — and `None` means "never fired". A Job that had fired at 09:30
+        // would read as overdue and fire a second time.
+        conn.execute("UPDATE jobs SET last_fired_at = 'not a timestamp'", [])
+            .unwrap();
+
+        let text = list_jobs(&conn).unwrap_err().to_string();
+        assert!(
+            text.contains("jobs.last_fired_at"),
+            "no column named in: {text}"
+        );
+        assert!(text.contains("not a timestamp"), "value not shown: {text}");
+    }
+
+    #[test]
+    fn a_bad_stored_draft_column_names_itself() {
+        let conn = open_in_memory().unwrap();
+        let job_id = insert_job(&conn, &sample_job("Day Task")).unwrap();
+        let fire_id = record_fire(
+            &conn,
+            job_id,
+            Utc::now(),
+            FireOutcome::Drafted,
+            false,
+            None,
+            1,
+        )
+        .unwrap()
+        .unwrap();
+        insert_draft(&conn, &sample_draft(job_id, fire_id, "x")).unwrap();
+
+        conn.execute("UPDATE drafts SET counts = 'lots'", [])
+            .unwrap();
+        let text = list_drafts(&conn).unwrap_err().to_string();
+        assert!(text.contains("drafts.counts"), "no column named in: {text}");
     }
 }

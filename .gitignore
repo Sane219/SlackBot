@@ -27,3 +27,6 @@ Cargo.lock.orig
 
 # macOS
 .DS_Store
+# Node. Only `ui/node_modules` — `dist/` IS committed (ADR-0009), because the Rust
+# binary embeds it and `cargo run` must not need Node.
+ui/node_modules/

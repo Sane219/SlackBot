@@ -13,6 +13,9 @@ fn base_url() -> String {
 
 struct Response {
     status: u16,
+    /// Header block as the server sent it, lowercased. Content type is part of the
+    /// contract — a stylesheet served as `text/plain` is not loaded.
+    headers: String,
     body: String,
 }
 
@@ -20,49 +23,22 @@ impl Response {
     fn json(&self) -> serde_json::Value {
         serde_json::from_str(&self.body).unwrap_or(serde_json::Value::Null)
     }
+
+    fn header(&self, name: &str) -> Option<String> {
+        self.headers.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_string())
+        })
+    }
 }
 
 /// A minimal HTTP/1.1 client, so the tests add no HTTP dependency and can assert on
 /// exact status codes — which matters here, because the difference between 200 and 409 is
 /// the difference between "posted" and "already posted".
 fn request(method: &str, path: &str, body: Option<&str>) -> Response {
-    let url = base_url();
-    let rest = url
-        .strip_prefix("http://")
-        .expect("SLACKBOT_E2E_URL must be http://");
-    let (host_port, path) = match rest.split_once('/') {
-        Some((h, p)) => (h, format!("/{p}{path}")),
-        None => (rest, path.to_string()),
-    };
-
-    let mut stream = TcpStream::connect(host_port).expect("connect to the slackbot server");
-    stream
-        .set_read_timeout(Some(std::time::Duration::from_secs(30)))
-        .unwrap();
-
-    let payload = body.unwrap_or("");
-    let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\
-         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{payload}",
-        payload.len()
-    );
-    stream.write_all(request.as_bytes()).unwrap();
-
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw).unwrap();
-
-    let status = raw
-        .split_whitespace()
-        .nth(1)
-        .and_then(|c| c.parse().ok())
-        .unwrap_or(0);
-    let body = raw
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b)
-        .unwrap_or("")
-        .to_string();
-
-    Response { status, body }
+    raw_request(method, path, body, &[])
 }
 
 fn get(path: &str) -> Response {
@@ -109,17 +85,18 @@ fn raw_request(method: &str, path: &str, body: Option<&str>, headers: &[(&str, &
 
     let mut raw = String::new();
     stream.read_to_string(&mut raw).unwrap();
+    let (headers, body) = raw.split_once("\r\n\r\n").unwrap_or((raw.as_str(), ""));
     let status = raw
         .split_whitespace()
         .nth(1)
         .and_then(|c| c.parse().ok())
         .unwrap_or(0);
-    let body = raw
-        .split_once("\r\n\r\n")
-        .map(|(_, b)| b)
-        .unwrap_or("")
-        .to_string();
-    Response { status, body }
+
+    Response {
+        status,
+        headers: headers.to_lowercase(),
+        body: body.to_string(),
+    }
 }
 
 fn post(path: &str, body: serde_json::Value) -> Response {
@@ -376,6 +353,73 @@ fn a_deleted_draft_is_not_approved_afterwards() {
 
 #[test]
 #[ignore = "needs a running server"]
+fn a_failed_approve_leaves_the_draft_in_the_inbox() {
+    // The bug this pins: `approve` claimed the Draft (setting `approved = 1`) and *then*
+    // discovered Slack was not configured, returning 412 without releasing the claim. The
+    // Draft disappeared from the Inbox, `approved_at` said it had been sent, and every
+    // later attempt returned 409 "already been approved". Approving once before setup
+    // silently destroyed a drafted post.
+    let Some(draft) = first_approvable_draft() else {
+        return; // Nothing waiting in this environment.
+    };
+
+    let first = post(
+        &format!("/api/drafts/{draft}/approve"),
+        serde_json::json!({}),
+    );
+    assert_ne!(first.status, 200, "approve must not succeed without Slack");
+
+    // Still listed, and still not approved — whatever the failure was.
+    let inbox = get("/api/inbox");
+    assert_eq!(inbox.status, 200, "the Inbox must still be readable");
+    let body = inbox.json();
+    let drafts = body["drafts"].as_array().expect("drafts is an array");
+    let still = drafts.iter().find(|d| d["id"].as_i64() == Some(draft));
+    assert!(
+        still.is_some(),
+        "a failed approve consumed draft {draft}: it is gone from the Inbox"
+    );
+    let still = still.unwrap();
+    assert_eq!(
+        still["approved"], false,
+        "a failed approve left draft {draft} marked approved"
+    );
+    assert!(
+        still["approved_at"].is_null(),
+        "a failed approve stamped draft {draft} as sent"
+    );
+
+    // And the same Draft can be tried again — a 409 here is the bricking.
+    let second = post(
+        &format!("/api/drafts/{draft}/approve"),
+        serde_json::json!({}),
+    );
+    assert_ne!(
+        second.status, 409,
+        "draft {draft} can no longer be retried: {}",
+        second.body
+    );
+}
+
+/// The id of a waiting Draft that has evidence, or `None`.
+fn first_approvable_draft() -> Option<i64> {
+    let inbox = get("/api/inbox");
+    if inbox.status != 200 {
+        return None;
+    }
+    inbox.json()["drafts"]
+        .as_array()?
+        .iter()
+        .find(|d| {
+            d["no_signal"] == false
+                && d["discarded"] == false
+                && !d["text"].as_str().unwrap_or("").trim().is_empty()
+        })
+        .and_then(|d| d["id"].as_i64())
+}
+
+#[test]
+#[ignore = "needs a running server"]
 fn a_disabled_job_can_be_toggled() {
     let res = post(
         "/api/jobs",
@@ -406,29 +450,78 @@ fn a_disabled_job_can_be_toggled() {
     request("DELETE", &format!("/api/jobs/{id}"), None);
 }
 
+/// The value of the first `attribute="…"` in `html`.
+///
+/// Split on the attribute name and the opening quote only. Including the closing quote
+/// in the needle yields `>` as the "value", which reads as a missing asset rather than a
+/// parser mistake.
+fn attribute(html: &str, attribute: &str) -> Option<String> {
+    let needle = format!("{attribute}=\"");
+    let after = html.split(&needle).nth(1)?;
+    let value = after.split('"').next().unwrap_or_default();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// Every asset `index.html` asks for is served, with the right content type.
+///
+/// The paths are read out of the page rather than hardcoded. Hardcoding them meant this
+/// test asserted `/app.js` exists while the build was emitting `/assets/app.js` — it
+/// would have kept passing against a UI that could not load. Following the page is the
+/// contract that actually matters (ADR-0009): whatever `dist/index.html` references must
+/// be embedded, or the board is blank.
 #[test]
 #[ignore = "needs a running server"]
-fn the_static_assets_are_served_with_correct_content_types() {
-    for (path, expected) in [
-        ("/", "text/html"),
-        ("/app.css", "text/css"),
-        ("/app.js", "text/javascript"),
-    ] {
-        let url = base_url();
-        let host_port = url.strip_prefix("http://").unwrap();
-        let mut stream = TcpStream::connect(host_port).unwrap();
-        stream
-            .write_all(
-                format!("GET {path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n")
-                    .as_bytes(),
-            )
-            .unwrap();
-        let mut raw = String::new();
-        stream.read_to_string(&mut raw).unwrap();
-        assert!(raw.starts_with("HTTP/1.1 200"), "{path} did not return 200");
+fn every_asset_the_page_references_is_served() {
+    let page = request("GET", "/", None);
+    assert_eq!(page.status, 200, "the page itself must be served");
+    assert!(
+        page.header("content-type")
+            .is_some_and(|t| t.contains("text/html")),
+        "the page must declare itself as html, got {:?}",
+        page.header("content-type")
+    );
+
+    let script = attribute(&page.body, "src")
+        .expect("index.html must load a script, or the board never renders");
+    let stylesheet = page
+        .body
+        .split("<link rel=\"stylesheet\"")
+        .nth(1)
+        .and_then(|rest| attribute(rest, "href"))
+        .expect("index.html must link a stylesheet, or the board is unstyled");
+
+    for (path, expected) in [(script, "text/javascript"), (stylesheet, "text/css")] {
         assert!(
-            raw.to_lowercase().contains(expected),
-            "{path} did not declare {expected}"
+            path.starts_with('/'),
+            "asset paths must be absolute, got {path}"
+        );
+        let response = request("GET", &path, None);
+        assert_eq!(response.status, 200, "{path} was not served");
+        assert!(
+            response
+                .header("content-type")
+                .is_some_and(|t| t.contains(expected)),
+            "{path} did not declare {expected}, got {:?}",
+            response.header("content-type")
+        );
+        assert!(
+            !response.body.is_empty(),
+            "{path} was served empty, which is the blank-screen failure"
         );
     }
+}
+
+/// A path that is not in `dist/` gets a real 404, not the page.
+///
+/// Falling back to `index.html` would turn a stale or partial `dist/` into a silently
+/// broken board: the browser would parse HTML as a module and report nothing useful.
+#[test]
+#[ignore = "needs a running server"]
+fn an_unknown_asset_is_a_404_not_the_page() {
+    let response = request("GET", "/assets/app.js.map", None);
+    assert_eq!(response.status, 404);
+    assert!(
+        !response.body.contains("<!doctype html"),
+        "a missing asset must not be answered with the page"
+    );
 }

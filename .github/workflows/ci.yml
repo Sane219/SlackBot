@@ -21,6 +21,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -29,6 +35,59 @@ jobs:
 
       - name: Test
         run: cargo test
+
+  # ADR-0009: `dist/` is committed because the Rust binary embeds it, and `cargo run`
+  # must not need Node. That makes the committed output a contract — a change to
+  # `ui/src` that does not regenerate `dist/` ships a UI the binary does not serve, and
+  # the failure is a blank page rather than an error.
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install
+        working-directory: ui
+        run: npm ci
+
+      - name: Build
+        working-directory: ui
+        run: npm run build
+
+      - name: The committed dist must match the sources
+        run: |
+          if ! git diff --quiet --exit-code -- dist; then
+            echo "dist/ is out of date. Run 'npm --prefix ui run build' and commit it:"
+            git --no-pager diff -- dist | head -100
+            exit 1
+          fi
+
+      - name: The page must reference only assets that are embedded
+        run: |
+          # Reads the paths out of the built page and checks each is in dist/, which is
+          # the same contract the e2e suite checks over HTTP — caught here too, so a
+          # broken bundle fails in the job that built it.
+          missing=0
+          for path in \
+            "$(sed -n 's/.*src="\([^"]*\)".*/\1/p' dist/index.html)" \
+            "$(sed -n 's/.*rel="stylesheet"[^>]*href="\([^"]*\)".*/\1/p' dist/index.html)"
+          do
+            if [ -z "$path" ]; then
+              echo "could not read an asset path out of dist/index.html"
+              exit 1
+            fi
+            if [ ! -f "dist$path" ]; then
+              echo "dist/index.html references $path, which is not in dist/"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ] || exit 1
+          echo "every referenced asset is present"
 
   # The end-to-end suite needs a listening server, so it runs after a build rather than
   # as part of `cargo test`. Without this the HTTP contract is only ever checked by hand.

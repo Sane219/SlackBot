@@ -112,6 +112,11 @@ additional amber mark dilutes the ones that matter.
 **The Vermilion Rule.** Vermilion is reserved for a failed Fire. If it appears anywhere
 else, it has stopped meaning anything and the user will miss the failure that mattered.
 
+**The Once Rule.** A problem that persists is stated every time; an *action* for it is
+offered once. The banner stays up because the cause is still there. The button inside it
+goes away once the user has been to Setup, because the floating Setup button is the same
+action and repeating it trains the reader to skip the banner.
+
 **The AA Floor Rule.** Every ink token clears 4.5:1 against `--wall` or
 `--wall-raised`. The first draft of this palette failed at 3.1:1 and was raised rather
 than shipped — a board you cannot read is not a board.
@@ -220,6 +225,30 @@ nor a block.
 - **Placeholder:** `--carbon-faint`.
 - **Secret fields:** `type="password"`, and once stored the placeholder becomes
   `•••••••• stored` so the field never implies it is empty.
+
+### The floating Setup button
+
+One control, fixed to the bottom-left, present on all three views.
+
+- **Shape:** square, `--wall-raised` ground, 2px rule, label at `0.78em` tracked.
+- **Placement:** bottom-left because it is the one corner no view puts content in. On the
+  wide board it sits inside the 180px spine, which is why the spine carries bottom
+  padding; below 860px the spine is a full-width band, so the pane carries it instead.
+  Measured by `ui/float-overlap.mjs`, which walks every scroll position on every tab at
+  three widths and asserts nothing is hidden *at rest*. Passing over text mid-scroll is
+  inherent to a fixed control and is reported rather than treated as a defect.
+- **Attention:** when setup is unfinished or a Fire has failed, it takes `--signal` for
+  border and text. It is the only control a user is expected to act on, so it is the one
+  that gets the pen.
+- **Repetition:** a banner that carries this same action is shown *once* per page load,
+  then the button alone carries it. A banner read ten times a day that repeats a button
+  teaches the reader to skip the whole strip, including the first line.
+
+### Checklist progress
+
+Setup is three numbered steps, not five credential rows on one screen. Progress is a 2px
+rule that fills — a mark, not a wash. A filled bar would put `--signal` across the pane
+width and break the One Voice Rule outright.
 
 ### Navigation
 
