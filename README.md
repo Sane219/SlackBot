@@ -96,9 +96,19 @@ source). macOS and Linux need nothing extra.
 | `cargo clippy --all-targets` | Lints. CI treats warnings as errors. |
 | `npm --prefix ui run build` | Rebuild the UI into `dist/`. **Then `cargo build`** — the binary embeds `dist/` at compile time, so skipping it serves the previous UI. |
 | `npm --prefix ui run verify` | 34 browser checks at three widths. Needs a running server. |
-| `scripts/seed-demo-db.sh <db>` | Fill a throwaway database with Jobs, Fires and Drafts, so the UI can be looked at without real credentials. |
+| `scripts/seed-demo-db.sh <db>` | Fill a throwaway database with Jobs, Fires and Drafts, so the UI can be looked at without real credentials. Stop the server first. |
+| `scripts/check.sh` | Format, clippy, unit tests, and whether `dist/` is current. The pre-commit hook runs this. |
+| `scripts/check.sh --full` | The above plus the e2e suite and the browser checks. Needs a running server. |
 
-CI also fails a pull request whose committed `dist/` does not match `ui/src` (ADR-0009).
+CI runs the same `scripts/check.sh`, plus the e2e and browser suites against a real server
+on a scratch database. One script, so the hook and CI cannot disagree — they once did, and
+the browser checks sat in a job with no server, failing on every run.
+
+Turn the hook on once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
 
 ## Architecture
 

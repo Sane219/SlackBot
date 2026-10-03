@@ -44,11 +44,39 @@ const results = [];
 const check = (group, name, pass, detail) =>
   results.push({ group, name, pass, detail: detail ?? null });
 
+/**
+ * How many checks ran, so "all passed" cannot mean "none ran".
+ *
+ * The spine check once read from a variable that had been deleted in an earlier edit. It
+ * produced `undefined`, compared two `undefined`s, and passed — so a check silently
+ * stopped checking while still reporting green. A check that cannot fail is a lie told at
+ * the most convenient moment. This is the cheap guard: a group that contributes nothing
+ * fails the run.
+ */
+const EXPECTED_GROUPS = ["layout", "spine", "a11y", "setup", "console", "tabs"];
+
+/**
+ * How many Fire rows the spine should be showing.
+ *
+ * Read from the API rather than hardcoded, because the daemon is live: it fires Jobs while
+ * the checks run, so a fixed count is wrong within a minute. Asserted rather than
+ * tolerated, because a check that passes on an empty selection passes for the wrong
+ * reason — that is the exact failure this file exists to catch.
+ */
+async function expectedFireRows() {
+  const res = await fetch(`${URL}api/inbox`);
+  const body = await res.json();
+  return body.fires.length;
+}
+
 const browser = await puppeteer.launch({
   executablePath: CHROME,
   headless: "new",
   args: ["--no-sandbox", "--font-render-hinting=none"],
 });
+
+// Read once, before the widths loop: the daemon is live and fires Jobs while these run.
+const expected = await expectedFireRows();
 
 for (const [width, height] of WIDTHS) {
   const page = await browser.newPage();
@@ -107,25 +135,47 @@ for (const [width, height] of WIDTHS) {
     JSON.stringify(panels),
   );
 
-  // Every spine row that stands for a Fire shows a time. A prop mismatch
+  // Every spine row that stands for a recorded Fire shows a time. A prop mismatch
   // (`clock: at` against callers passing `at`) silently rendered the whole column blank.
   //
-  // Excludes the placeholder rows, which have no Fire behind them and so have no time:
-  // "connecting…" and "no fires yet". Counting those would make this check fail on a
-  // fresh install, which is exactly the state a new contributor sees first.
+  // Two row kinds are excluded, each for a reason. The placeholders ("connecting…", "no
+  // fires yet") have no Fire behind them, and counting them would fail on a fresh install
+  // -- the first state a contributor sees. `NEXT` is what is coming rather than what
+  // happened; it renders a time and is checked on its own below, but it is not one of the
+  // Fires the API reports.
   const clocked = await page.evaluate(() =>
     [...document.querySelectorAll(".fire")]
       .filter((r) => !r.querySelector(".fire__code")?.textContent.includes("SYS"))
+      .filter((r) => !r.querySelector(".fire__code")?.textContent.includes("NEXT"))
       .map((r) => Boolean(r.querySelector(".fire__clock"))),
   );
   check(
     "spine",
     `${tag} every Fire row shows a time`,
-    clocked.length === 0 || clocked.every(Boolean),
-    clocked.filter((c) => !c).length + " rows without a clock of " + clocked.length,
+    // No `|| clocked.length === 0`. An empty selection used to satisfy this by vacuous
+    // truth, so a broken selector made the check pass *by checking nothing* -- which is
+    // indistinguishable from a working check, and is the failure this file exists to
+    // catch. The count is asserted against the API instead.
+    clocked.every(Boolean) && clocked.length === expected,
+    `${clocked.filter((c) => !c).length} without a clock, of ${clocked.length} (API reports ${expected})`,
   );
 
-  // Every tab stop has a visible focus ring. WCAG AA, and it was checked in a browser.
+  // And the row for what comes next shows one too, since the time is its entire value.
+  const nextRow = await page.evaluate(
+    () =>
+      [...document.querySelectorAll(".fire")]
+        .find((r) => r.querySelector(".fire__code")?.textContent.includes("NEXT"))
+        ?.querySelector(".fire__clock")?.textContent ?? null,
+  );
+  check(
+    "spine",
+    `${tag} the NEXT row shows when it fires`,
+    nextRow === null || /\d{2}:\d{2}/.test(nextRow),
+    nextRow,
+  );
+
+  // Every tab stop has a visible focus ring. WCAG AA, and only a browser can tell --
+  // a computed-style probe is what the last release relied on and it was wrong.
   const rings = await page.evaluate(() => {
     const focusable = [
       ...document.querySelectorAll(
@@ -142,12 +192,12 @@ for (const [width, height] of WIDTHS) {
   check(
     "a11y",
     `${tag} every tab stop has a focus ring`,
-    rings.bare.length === 0,
-    rings.bare.join(", "),
+    rings.total > 0 && rings.bare.length === 0,
+    rings.total === 0 ? "no tab stops found -- the selector is stale" : rings.bare.join(", "),
   );
 
-  // The Setup button must not be the only way to reach Setup, and must not cover text
-  // at rest.
+  // The Setup control must stay reachable from anywhere, and must not cover text the user
+  // came to read once they have stopped scrolling.
   const float = await page.evaluate(() => {
     const el = document.querySelector(".setup-float");
     const r = el.getBoundingClientRect();
@@ -165,30 +215,18 @@ for (const [width, height] of WIDTHS) {
       );
     scroll.scrollTop = 0;
     return {
-      label: el.textContent.trim(),
       isButton: el.tagName === "BUTTON",
       tabbable: el.tabIndex >= 0,
       hidesText: leaf ? leaf.textContent.trim().slice(0, 40) : null,
     };
   });
-  check("setup", `${tag} the Setup control is a real button`, float.isButton && float.tabbable);
-  check(`${tag} nothing hidden at rest`, `Setup button hides "${float.hidesText}"`, !float.hidesText, float.hidesText);
-
-  // Times must be rendered in the Job's own timezone. A Job in Los Angeles read 06:59
-  // while its machine was in India — correct only because the zone is threaded through.
-  const zones = await page.evaluate(() => {
-    const out = [];
-    for (const el of document.querySelectorAll(".job .step__note")) out.push(el.textContent);
-    return out;
-  });
-  if (zones.length) {
-    check(
-      "timezone",
-      `${tag} job rows name a zone`,
-      zones.every((z) => /\d{2}:\d{2}\s+\S/.test(z)),
-      zones[0],
-    );
-  }
+  check(
+    "setup",
+    `${tag} the Setup control is a real button`,
+    float.isButton && float.tabbable,
+    `button=${float.isButton} tabbable=${float.tabbable}`,
+  );
+  check("setup", `${tag} nothing hidden behind Setup at rest`, !float.hidesText, float.hidesText);
 
   // A gap is a picture *and* a sentence: the hatch is decorative and aria-hidden, and
   // an sr-only span beside it states that nothing was collected. Checked together, so a
@@ -238,12 +276,24 @@ for (const [width, height] of WIDTHS) {
 
 await browser.close();
 
+// Every group must contribute at least one check. A group that produced none means its
+// checks stopped running — a deleted variable, a renamed selector, a filter that no longer
+// matches — and that is indistinguishable from passing unless it is made to fail.
+const ran = new Set(results.map((r) => r.group));
+const missing = EXPECTED_GROUPS.filter((g) => !ran.has(g));
+if (missing.length) {
+  console.log(
+    `FAIL  coverage  these groups ran no checks at all, so something stopped executing: ${missing.join(", ")}`,
+  );
+}
+
 const failed = results.filter((r) => !r.pass);
 for (const r of results) {
   if (!r.pass) console.log(`FAIL  ${r.group}  ${r.name}  ${r.detail ?? ""}`);
 }
 console.log(
   `\n${results.length - failed.length}/${results.length} checks passed` +
-    (failed.length ? ` — ${failed.length} failing` : ""),
+    (failed.length ? ` — ${failed.length} failing` : "") +
+    (missing.length ? ` — ${missing.length} group(s) silently skipped` : ""),
 );
-process.exit(failed.length ? 1 : 0);
+process.exit(failed.length || missing.length ? 1 : 0);

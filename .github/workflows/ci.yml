@@ -23,14 +23,11 @@ jobs:
 
       # No Node here. `check` is Rust-only; the `ui` and `e2e` jobs set up Node
       # themselves, and an unused setup step is a cache restore nobody reads.
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features
-
-      - name: Test
-        run: cargo test
+      # The same script `.githooks/pre-commit` runs. They were separate once and drifted:
+      # the browser checks lived in a job with no server, so they failed on every run
+      # while the commit that added them said they worked.
+      - name: Checks
+        run: scripts/check.sh
 
   # ADR-0009: `dist/` is committed because the Rust binary embeds it, and `cargo run`
   # must not need Node. That makes the committed output a contract — a change to
@@ -51,17 +48,18 @@ jobs:
         working-directory: ui
         run: npm ci
 
-      - name: Build
-        working-directory: ui
-        run: npm run build
-
+      # Rebuild from scratch and diff against what is committed. ADR-0009: `dist/` is part
+      # of the repository, so a source change that does not regenerate it ships a binary
+      # serving the previous page — a blank screen rather than an error.
       - name: The committed dist must match the sources
         run: |
+          npm --prefix ui run build
           if ! git diff --quiet --exit-code -- dist; then
             echo "dist/ is out of date. Run 'npm --prefix ui run build' and commit it:"
-            git --no-pager diff -- dist | head -100
+            git --no-pager diff --stat -- dist
             exit 1
           fi
+          echo "dist/ matches ui/src"
 
       # The page must reference only assets that are embedded. Read the paths out of the
       # built page and check each is in dist/, so a bundle that exists but is unreferenced

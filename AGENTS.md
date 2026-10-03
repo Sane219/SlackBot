@@ -45,23 +45,25 @@ those terms. The tool imposes no names or shapes for a team's status messages
 ## Before changing the UI
 
 `ui/` is a React app built by Vite to `dist/`, which is **committed** and embedded in
-the binary by `build.rs`. So a UI change is two commands:
+the binary by `build.rs`. A UI change is therefore two commands, and the second is the one
+that gets forgotten:
 
 ```sh
-npm --prefix ui install && npm --prefix ui run build   # after changing ui/src
-cargo build                                           # or cargo run
+npm --prefix ui run build && cargo build
 ```
 
-Skipping the `cargo build` serves the *previous* UI: `include_str!` reads `dist/` at
-compile time. CI fails a pull request whose `dist/` does not match its sources.
-
-Verify in a real browser, against a server on `:7321`:
+Enable the hook once per clone, or the checks only ever run in CI:
 
 ```sh
-scripts/seed-demo-db.sh "$SLACKBOT_DATA_DIR/slackbot.db"   # throwaway data to look at
-node ui/verify.mjs        # 34 assertions at 1440 / 1024 / 390
-node ui/shot.mjs label --tab=jobs --w=390 --h=844 --full
+git config core.hooksPath .githooks
 ```
+
+Skipping the `cargo build` serves the *previous* UI — `include_str!` reads `dist/` at
+compile time, so the binary is unchanged until it is recompiled. This is the whole
+UI gotcha; CI fails a pull request whose `dist/` does not match its sources.
+
+Then look at it. `scripts/check.sh` runs what CI runs; `node ui/shot.mjs <label>
+--tab=jobs --w=390 --h=844 --full` puts pixels on disk for a human.
 
 **Screenshots, not DOM assertions.** A probe once reported `hidden` as set correctly
 while the element was plainly on screen, because a class's `display: flex` beat the
