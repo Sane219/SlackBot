@@ -9,7 +9,7 @@
 import puppeteer from "puppeteer-core";
 import { readFileSync, writeFileSync } from "node:fs";
 
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const CHROME = process.env.SB_CHROME || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const URL = process.env.SB_URL || "http://127.0.0.1:7321/";
 const OUT = "/tmp/sbtest";
 

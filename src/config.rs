@@ -132,6 +132,24 @@ pub fn write_github_login(path: &std::path::Path, login: &str) -> std::io::Resul
     write_settings(path, &[("github_login", login)])
 }
 
+/// Whether a Draft is posted without a human clicking Approve.
+///
+/// **Off unless the user has explicitly turned it on** (ADR-0010). This is the one
+/// setting in the tool that can put a message in a team channel with nobody watching,
+/// so its default is the safe one and there is no way to inherit it from anywhere else.
+pub fn read_auto_send(path: &std::path::Path) -> bool {
+    line_value(
+        &std::fs::read_to_string(path).unwrap_or_default(),
+        "auto_send",
+    )
+    .as_deref()
+        == Some("true")
+}
+
+pub fn write_auto_send(path: &std::path::Path, on: bool) -> std::io::Result<()> {
+    write_settings(path, &[("auto_send", if on { "true" } else { "false" })])
+}
+
 /// Add or replace the named keys, leaving every other line alone.
 ///
 /// One writer for the whole file, because two writers that disagree about whether to

@@ -1,8 +1,1 @@
-.github/
 node_modules/
-target/
-/tmp/
-*.png
-*.json
-!package.json
-!package-lock.json

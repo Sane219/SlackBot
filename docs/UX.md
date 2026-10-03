@@ -26,6 +26,9 @@ cargo run → browser opens
 │  3  Set the model      endpoint + name + key            │
 │                                                          │
 │  progress: ▓▓▓░░░  2 of 3                              │
+│                                                          │
+│  4  Auto-send      [ ] send each Draft without waiting  │
+│                     off unless you turn it on           │
 └──────────────────────────────────────────────────────────┘
    │
    ▼  describe your routine in a sentence
@@ -54,6 +57,14 @@ cargo run → browser opens
 ```
 
 ## Decisions, and what each one refuses
+
+**Auto-send is one switch, off by default (ADR-0010).** When it is on, a Draft posts itself
+the moment it is written. When it is off, every Draft waits for a click. It is a plain
+checkbox with the consequence in the label, not a dialog: once it is on, a wrong post goes
+out under your own name with nobody watching. Two things still never auto-send — a window
+that collected nothing, and a Draft missing a source. Those wait in the Inbox, because a
+broken window is not a status update. Declining by *leaving the Draft in the Inbox* is why
+this needs no new state: the user sees exactly what arrived and why it is still waiting.
 
 **Setup is a checklist, not a form.** Five credential rows plus a textarea on one screen
 is a wall, and a wall gets partially completed. Three numbered steps means there is

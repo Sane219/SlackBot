@@ -4,8 +4,9 @@ Drafts the status messages your team expects — a morning task list, a midday p
 note, an end-of-day summary — from your own Slack messages and your own GitHub
 comments, on a schedule you set once.
 
-**It never posts on its own.** Every message waits in the Inbox until you click
-Approve.
+**It posts nothing you have not asked for.** By default every message waits in the Inbox
+until you click Approve. One switch in Setup turns on auto-send, and then each Draft goes
+out as it is written. It is off until you turn it on, and nothing else can (ADR-0010).
 
 ```
 cargo run
@@ -26,7 +27,11 @@ Three times a day, for each Job you configure:
 3. **Wait.** The Draft appears in the Inbox. You read it, edit it, and either Approve
    it or Discard it.
 
-Approve is the only path to Slack that exists in the code. A test asserts it.
+`deliver` is the only path to Slack that exists in the code, and a test asserts that
+exactly two things reach it: a click on Approve, and auto-send.
+
+Auto-send never posts a Draft whose window collected nothing, or one that is missing a
+source. Those stay in the Inbox for you, because a broken window is not a status update.
 
 ## Setup
 

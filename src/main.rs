@@ -170,6 +170,9 @@ async fn main() {
         source,
         has_slack: slack.is_some(),
         has_github: github.is_some(),
+        // For auto-send only (ADR-0010). Posts still go through `routes::deliver`, which
+        // is the single caller of `chat.postMessage`.
+        slack: slack.clone(),
         llm: llm.clone().unwrap_or_else(|| {
             // A placeholder so the type is satisfied; every path that uses it checks
             // `llm.is_some()` first and refuses with a clear message.

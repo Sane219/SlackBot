@@ -65,6 +65,10 @@ export const api = {
   channels: () => request("/api/channels"),
   llmSettings: () => request("/api/setup/llm"),
 
+  // ADR-0010. A Draft goes out with nobody watching when this is on.
+  autoSend: (enabled) =>
+    request("/api/setup/auto-send", { method: "POST", body: { enabled } }),
+
   saveCredential: (kind, value) =>
     request("/api/setup/credential", { method: "POST", body: { kind, value } }),
   verifyCredential: (kind) =>

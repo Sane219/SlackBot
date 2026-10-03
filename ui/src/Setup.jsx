@@ -134,12 +134,73 @@ function LlmField({ onDone }) {
   );
 }
 
+/**
+ * Post with nobody watching (ADR-0010).
+ *
+ * Off by default and nothing else in the app can turn it on. The cost is stated in the
+ * label rather than a dialog: once this is on, a wrong post goes out under your own name
+ * and there is no recall, and no one is watching when it happens.
+ *
+ * It is a checkbox and one POST. Deliberately not per-Job — see ADR-0010 for why the
+ * scope is one switch.
+ */
+function AutoSend({ on, onDone }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+
+  const flip = async (next) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.autoSend(next);
+      onDone();
+    } catch (err) {
+      setError(err.message);
+    }
+    setBusy(false);
+  };
+
+  return (
+    <section className="step-group">
+      <h2 className="step-group__title">
+        <span className="step-group__n">4</span> Auto-send
+      </h2>
+
+      <label className="checkline">
+        <input
+          type="checkbox"
+          checked={on}
+          disabled={busy}
+          onChange={(e) => flip(e.target.checked)}
+        />
+        <span>
+          Send each Draft the moment it is written, without waiting for you
+        </span>
+      </label>
+
+      <p className="step__note">
+        {on
+          ? "On. A Draft posts on its own at its scheduled time. A Draft that collected nothing, or that is missing a source, still waits for you — a broken window is not a status update."
+          : "Off. Every Draft waits in the Inbox until you click Approve."}
+      </p>
+
+      {error && (
+        <div className="step__error" role="alert">
+          {error}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function Setup({ setup, onDone, onDoneJobs }) {
   const present = setup?.present || {};
   const llm = present.llm;
   const slack = present.slack_token && present.slack_cookie;
   const github = present.github;
 
+  // Three, not four. Auto-send is optional and not part of being configured; counting it
+  // would mean the board reads "3 of 4" forever on an install that never wants it.
   const steps = [
     { done: slack, label: "Connect Slack" },
     { done: github, label: "Connect GitHub" },
@@ -212,6 +273,8 @@ export function Setup({ setup, onDone, onDoneJobs }) {
           hand.
         </p>
       )}
+
+      <AutoSend on={Boolean(setup?.auto_send)} onDone={onDone} />
     </div>
   );
 }

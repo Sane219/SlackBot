@@ -1,5 +1,11 @@
 # Never post without an explicit Approve
 
+> **Partly superseded by [ADR-0010](0010-auto-send.md).** The reasoning below still holds:
+> a wrong post under your own name is unrecoverable. What changed is that the user can now
+> choose, once, in Setup, to have Drafts posted without a click. The default is still off,
+> and nothing else in the app can turn it on. Where this document says "no code path", read
+> "no code path unless the user has explicitly enabled auto-send".
+
 No code path in this tool sends a message to Slack without a human clicking Approve on a
 specific Draft. Not on a timer, not when confidence is high, not when the user has
 approved a previous one, not after an outage drains the Inbox.
@@ -16,8 +22,9 @@ not need, and a Draft that sits unapproved is a Draft the user still has to noti
 
 ## Consequences
 
-`chat.postMessage` is reachable from exactly one place in the codebase — the Approve
-handler. Every other route reads or drafts. This is the property the rest of the design
+`chat.postMessage` is reachable from exactly one place in the codebase — `deliver`,
+which the Approve handler and auto-send both call. ADR-0010 widened who may reach it, not
+how many places it is called from. Every other route reads or drafts. This is the property the rest of the design
 leans on, and it is worth a test that fails if a second caller ever appears.
 
 That test has to be written carefully, and the obvious version was worthless: it skipped

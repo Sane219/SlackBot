@@ -67,6 +67,17 @@ jobs:
             exit 1
           fi
 
+      # The browser checks. They need a running server, so this is the one place they can
+      # run unattended — they were previously never run by anything, which is why two dead
+      # scripts accumulated alongside them.
+      #
+      # puppeteer-core needs a browser binary. Chrome is preinstalled on ubuntu-latest, so
+      # no download is required; `SB_CHROME` overrides it elsewhere.
+      - name: Browser checks
+        env:
+          SB_CHROME: /usr/bin/google-chrome
+        run: npm --prefix ui run verify
+
       - name: The page must reference only assets that are embedded
         run: |
           # Reads the paths out of the built page and checks each is in dist/, which is

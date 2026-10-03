@@ -190,6 +190,12 @@ pub struct FireRunner {
     /// genuinely quiet one.
     pub has_slack: bool,
     pub has_github: bool,
+    /// The Slack client, for auto-send (ADR-0010).
+    ///
+    /// Held here so the scheduler can post without an `AppState`, which it has no way to
+    /// reach. It is *not* a second writer: every call still goes through
+    /// `routes::deliver`, which is the only function that calls `chat.postMessage`.
+    pub slack: Option<std::sync::Arc<crate::slack::SlackClient>>,
 }
 
 impl FireRunner {
@@ -520,8 +526,12 @@ async fn tick_locked(
         if let Some(due) = due_at {
             // The database's (job, tick) index is the real duplicate guard, so re-firing
             // within the same tick is a no-op rather than a second post.
-            runner.fire(conn, &job, due).await?;
+            let fired = runner.fire(conn, &job, due).await?;
             fired_any = true;
+
+            if let Some(fire) = fired {
+                auto_send(conn, runner, &job, fire.id).await?;
+            }
         }
     }
 
@@ -533,6 +543,67 @@ async fn tick_locked(
     }
 
     Ok(())
+}
+
+/// Post a Draft without a human, if the user has asked for that (ADR-0010).
+///
+/// Two things this deliberately does **not** do, both of which matter more with nobody
+/// watching than they would if a human were reading every word:
+///
+/// - **It never posts a partial Draft.** `partial` means a source failed and the Draft
+///   says so in its own text — "GitHub could not be read for this window". A human
+///   approving that is making a judgement. Nobody is here to make it, and the message
+///   would land in a team channel naming a defect.
+/// - **It never posts a gap.** A window that collected nothing is not a status update.
+///
+/// When it declines, it declines by *leaving the Draft in the Inbox*. That is the whole
+/// design: nothing is silently swallowed (ADR-0002) and nothing needs new state. The
+/// user opens the board and sees exactly what arrived and why it is still waiting.
+async fn auto_send(
+    conn: &std::sync::Mutex<rusqlite::Connection>,
+    runner: &FireRunner,
+    job: &Job,
+    fire_id: i64,
+) -> Result<(), String> {
+    if !crate::config::read_auto_send(&crate::config::settings_path()) {
+        return Ok(());
+    }
+
+    let draft = {
+        let guard = conn.lock().unwrap_or_else(|e| e.into_inner());
+        store::list_unapproved(&guard).map_err(|e| e.to_string())?
+    };
+    let Some(draft) = draft.into_iter().find(|d| d.fire_id == fire_id) else {
+        return Ok(());
+    };
+
+    // `deliver` refuses both of these too, so a check here is not a second line of
+    // defence against a bad post — it is the difference between "not posted, still in
+    // the Inbox" and "consumed by the discard path".
+    if draft.no_signal || draft.partial {
+        return Ok(());
+    }
+
+    let slack = runner.slack.as_deref();
+
+    match crate::routes::deliver(conn, slack, draft.id).await {
+        Ok(sent) => {
+            if sent.ok {
+                println!("auto-sent {:?} to {}", job.name, job.channel.name);
+            }
+            Ok(())
+        }
+        // A failed auto-send must not stop the scheduler or fail the Fire: `deliver`
+        // releases the claim, so the Draft is still in the Inbox and the user can send
+        // it by hand.
+        Err((status, message)) => {
+            eprintln!(
+                "auto-send failed for {:?}: {} {}",
+                job.name, status, message
+            );
+            Ok(())
+        }
+    }
 }
 
 /// Record Fires whose due time passed while the process was not running.
@@ -671,6 +742,7 @@ mod tests {
             }),
             has_slack: true,
             has_github: true,
+            slack: None,
             llm: Arc::new(llm(&server)),
         };
 
@@ -698,6 +770,7 @@ mod tests {
             }),
             has_slack: true,
             has_github: true,
+            slack: None,
             llm: Arc::new(llm(&server)),
         };
 
@@ -736,6 +809,7 @@ mod tests {
             // GitHub configured, Slack not: exactly the partial case.
             has_slack: false,
             has_github: true,
+            slack: None,
             llm: Arc::new(llm(&server)),
         };
 
@@ -771,6 +845,7 @@ mod tests {
             }),
             has_slack: true,
             has_github: true,
+            slack: None,
             llm: Arc::new(llm(&server)),
         };
 
@@ -798,6 +873,7 @@ mod tests {
             }),
             has_slack: true,
             has_github: true,
+            slack: None,
             llm: Arc::new(llm(&server)),
         };
 
@@ -874,6 +950,7 @@ mod tests {
             }),
             has_slack: true,
             has_github: true,
+            slack: None,
             llm: Arc::new(llm(&server)),
         };
 
@@ -965,6 +1042,7 @@ mod tests {
             }),
             has_slack: true,
             has_github: true,
+            slack: None,
             llm: Arc::new(llm(&server)),
         };
 
@@ -994,6 +1072,7 @@ mod tests {
             }),
             has_slack: true,
             has_github: true,
+            slack: None,
             llm: Arc::new(llm(&server)),
         };
 
@@ -1020,6 +1099,7 @@ mod tests {
             }),
             has_slack: true,
             has_github: true,
+            slack: None,
             llm: Arc::new(llm(&server)),
         };
 
@@ -1062,6 +1142,7 @@ mod tests {
             }),
             has_slack: true,
             has_github: true,
+            slack: None,
             llm: Arc::new(llm(&server)),
         };
 
@@ -1112,6 +1193,7 @@ mod tests {
             }),
             has_slack: true,
             has_github: true,
+            slack: None,
             llm: Arc::new(llm(&server)),
         };
 

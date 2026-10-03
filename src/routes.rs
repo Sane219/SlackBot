@@ -112,10 +112,16 @@ fn require_json_content_type(headers: &axum::http::HeaderMap) -> Result<(), ApiE
 /// panic takes the tool down for the rest of the session, so the guard is taken and the
 /// connection used anyway.
 fn lock(state: &AppState) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
-    state
-        .conn
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    lock_conn(&state.conn)
+}
+
+/// The same, for the handful of places that hold a connection rather than the whole
+/// state. `deliver` is one: it is called both from an HTTP handler and from the
+/// scheduler's auto-send branch, and only the handler has an `AppState`.
+fn lock_conn(
+    conn: &std::sync::Mutex<rusqlite::Connection>,
+) -> std::sync::MutexGuard<'_, rusqlite::Connection> {
+    conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl From<StoreError> for ApiError {
@@ -159,6 +165,9 @@ struct SetupStatus {
     present: PresentCredentials,
     slack_ready: bool,
     collection_ready: bool,
+    /// ADR-0010. Read here rather than through a separate endpoint so the Setup board
+    /// has one request, and so the switch cannot show a state the server disagrees with.
+    auto_send: bool,
 }
 
 async fn setup_status(State(state): State<AppState>) -> Json<SetupStatus> {
@@ -166,6 +175,7 @@ async fn setup_status(State(state): State<AppState>) -> Json<SetupStatus> {
     Json(SetupStatus {
         slack_ready: present.slack_ready(),
         collection_ready: present.collection_ready(),
+        auto_send: crate::config::read_auto_send(&crate::config::settings_path()),
         present,
     })
 }
@@ -425,6 +435,32 @@ async fn save_llm(
 async fn llm_settings(State(state): State<AppState>) -> Json<LlmSettings> {
     let _ = &state;
     Json(crate::config::read_llm_settings(&crate::config::settings_path()).unwrap_or_default())
+}
+
+// ── Auto-send ──────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct SetAutoSend {
+    enabled: bool,
+}
+
+/// Turn unattended posting on or off (ADR-0010).
+///
+/// A bool and nothing else: no readiness check, no mode object. Turning it on with Slack
+/// unconfigured is not a mistake worth guarding against, because `deliver` already fails
+/// safely in that case — the Draft is left unclaimed in the Inbox and the Fire shows as
+/// failed, which is where a real problem would already be visible.
+async fn set_auto_send(
+    headers: axum::http::HeaderMap,
+    Json(body): Json<SetAutoSend>,
+) -> Result<StatusCode, ApiError> {
+    reject_cross_origin(&headers)?;
+    require_json_content_type(&headers)?;
+
+    crate::config::write_auto_send(&crate::config::settings_path(), body.enabled)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ── Jobs ───────────────────────────────────────────────────────────────────
@@ -868,32 +904,35 @@ async fn regenerate_draft(
     Ok(Json(store::get_draft(&lock(&state), id)?))
 }
 
-/// **The only path to Slack.**
-///
-/// Approve is the sole caller of `chat.postMessage` in this codebase. ADR-0001 depends on
-/// that, and `only_approve_reaches_slack` holds it.
+/// The outcome of posting a Draft. Returned over HTTP and read by the scheduler's
+/// auto-send branch, so its fields are public.
 #[derive(Serialize)]
-struct ApproveResult {
-    ok: bool,
+pub struct ApproveResult {
+    pub ok: bool,
     /// Slack's message timestamp, so the user can find what was sent.
-    ts: String,
+    pub ts: String,
     /// Set when nothing was sent, which is the case for a gap.
-    note: Option<String>,
+    pub note: Option<String>,
 }
 
-async fn approve(
-    State(state): State<AppState>,
-    Path(id): Path<i64>,
-    headers: axum::http::HeaderMap,
-) -> Result<Json<ApproveResult>, ApiError> {
-    // A page the user happens to be visiting can POST to loopback: DNS-rebinding and
-    // cross-origin form posts both reach this server, and a body-less POST needed no
-    // token. That would post to a team channel with no human clicking anything, which is
-    // precisely what ADR-0001 forbids. A same-origin check closes it.
-    reject_cross_origin(&headers)?;
-    require_json_content_type(&headers)?;
-
-    let draft = store::get_draft(&lock(&state), id)?;
+/// Post a Draft to Slack. The only function that calls `chat.postMessage`.
+///
+/// ADR-0001 made this a property of the code rather than a setting. ADR-0010 widened
+/// *who* may reach it — a human clicking Approve, or auto-send — but deliberately did not
+/// widen *how many places* it is called from. The call site count stays at one, so the
+/// guard sequence below cannot be duplicated and drift, and `only_approve_reaches_slack`
+/// keeps checking something true.
+///
+/// Every precondition is evaluated before the claim. A check after it returns without
+/// releasing, which strands the Draft as approved-but-unsent; that happened once already
+/// when "slack is not configured" came after the claim, and it destroyed a drafted post
+/// silently.
+pub async fn deliver(
+    conn: &std::sync::Mutex<rusqlite::Connection>,
+    slack_client: Option<&crate::slack::SlackClient>,
+    id: i64,
+) -> Result<ApproveResult, ApiError> {
+    let draft = store::get_draft(&lock_conn(conn), id)?;
 
     if draft.approved {
         return Err((
@@ -905,40 +944,37 @@ async fn approve(
     // An empty Draft means the model call failed. Approving it would post an empty
     // message, which is indistinguishable from a bug in the channel.
     if draft.text.trim().is_empty() {
-        store::discard_draft(&lock(&state), id)?;
+        store::discard_draft(&lock_conn(conn), id)?;
         return Err((
             StatusCode::CONFLICT,
             "this draft could not be generated, so there is nothing to send".into(),
         ));
     }
 
-    // A gap has nothing to post. Approving it would put "NO SIGNAL" in a channel, which
-    // is worse than nothing.
+    // A gap has nothing to post. Posting it would put "NO SIGNAL" in a channel, which is
+    // worse than nothing.
     if draft.no_signal {
-        store::discard_draft(&lock(&state), id)?;
-        return Ok(Json(ApproveResult {
+        store::discard_draft(&lock_conn(conn), id)?;
+        return Ok(ApproveResult {
             ok: false,
             ts: String::new(),
             note: Some(
                 "nothing was collected for that window, so there was nothing to post".into(),
             ),
-        }));
+        });
     }
 
-    // Checked *before* the claim. This used to come after it, and a 412 here returned
-    // without releasing: the Draft stayed marked approved, vanished from the Inbox, and
-    // could never be sent. Approving once before Slack was configured silently destroyed
-    // a drafted post, and `approved_at` said it had been sent.
-    let slack = state.slack.as_ref().ok_or((
+    // Before the claim. See the note on this function.
+    let slack = slack_client.ok_or((
         StatusCode::PRECONDITION_FAILED,
         "slack is not configured yet".into(),
     ))?;
 
-    // Claim it before the Slack call. Reading `approved` and *then* posting was not
-    // atomic: two concurrent requests both saw false, both posted, and the user got two
-    // copies of the same message. The claim is the only step after this that can leave
-    // state changed, and the one that can fail — the Slack send — releases it.
-    let claimed = store::claim_for_send(&lock(&state), id, now())?;
+    // Claim before the Slack call. Reading `approved` and *then* posting was not atomic:
+    // two concurrent requests both saw false, both posted, and the user got two copies of
+    // the same message. The claim is the only step after this that leaves state changed,
+    // and the one that can fail — the Slack send — releases it.
+    let claimed = store::claim_for_send(&lock_conn(conn), id, now())?;
     if !claimed {
         return Err((
             StatusCode::CONFLICT,
@@ -946,21 +982,39 @@ async fn approve(
         ));
     }
 
-    let job = store::get_job(&lock(&state), draft.job_id)?;
+    let job = store::get_job(&lock_conn(conn), draft.job_id)?;
 
     match slack.post(&job.channel.id, &draft.text).await {
-        Ok(ts) => Ok(Json(ApproveResult {
+        Ok(ts) => Ok(ApproveResult {
             ok: true,
             ts,
             note: None,
-        })),
+        }),
         Err(err) => {
             // The send failed, so the Draft goes back in the Inbox. Leaving it claimed
             // would silently swallow a post the user never sent.
-            store::release_claim(&lock(&state), id)?;
+            store::release_claim(&lock_conn(conn), id)?;
             Err((StatusCode::BAD_GATEWAY, err.to_string()))
         }
     }
+}
+
+async fn approve(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<ApproveResult>, ApiError> {
+    // A page the user happens to be visiting can POST to loopback: DNS-rebinding and
+    // cross-origin form posts both reach this server, and a body-less POST needed no
+    // token. That would post to a team channel with no human clicking anything. A
+    // same-origin check closes it, and it is checked here rather than in `deliver`
+    // because auto-send is not an HTTP request and has no headers to check.
+    reject_cross_origin(&headers)?;
+    require_json_content_type(&headers)?;
+
+    deliver(&state.conn, state.slack.as_deref(), id)
+        .await
+        .map(Json)
 }
 
 /// Fire a Job immediately, for testing the whole path without waiting for the clock.
@@ -1042,6 +1096,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/setup/credential", post(save_credential))
         .route("/api/setup/verify", post(verify_credential))
         .route("/api/setup/llm", get(llm_settings).post(save_llm))
+        .route("/api/setup/auto-send", post(set_auto_send))
         .route("/api/jobs", get(list_jobs).post(create_job))
         .route("/api/channels", get(list_channels))
         .route(
@@ -1063,6 +1118,20 @@ pub fn router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use crate::domain::FireOutcome;
+
+    /// Everything above the test module, so a source-scanning test does not read itself.
+    ///
+    /// Two earlier attempts used `split("#[cfg(test)]").next()`, which truncated
+    /// `scheduler.rs` at line 140 — hundreds of lines above the real code, because that
+    /// file gates its test *helper* on `#[cfg(test)]`, not just its test module. The
+    /// scheduler's caller was invisible and the test reported one caller where there were
+    /// two. Cutting at `mod tests` is what was actually meant.
+    fn production(source: &str) -> &str {
+        source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(source)
+    }
 
     /// ADR-0001: `chat.postMessage` is reachable from exactly one function. A second
     /// caller would mean something could post without a human clicking Approve.
@@ -1129,7 +1198,13 @@ mod tests {
             "the only call must be in the HTTP layer"
         );
 
-        // And that place must be `approve`, so moving the call to another handler fails.
+        // And that place must be `deliver`, so moving the call to another handler fails.
+        //
+        // This used to require `approve`. ADR-0010 added auto-send as a second authorised
+        // caller, and the call moved into `deliver` — one function both go through, so the
+        // guard sequence cannot be duplicated and drift. The assertion changed with it
+        // rather than being deleted: the invariant is still "one call site", and it is
+        // still checked, but it now names the function that actually holds it.
         let routes = &routes_without_tests;
         let call_line = call_sites[0].1;
         let before = routes
@@ -1139,9 +1214,71 @@ mod tests {
             .join("\n");
         let enclosing = before.rsplit("async fn ").next().unwrap_or("");
         assert!(
-            enclosing.starts_with("approve"),
-            "the only Slack write must be inside `approve`, found it inside `{}`",
+            enclosing.starts_with("deliver"),
+            "the only Slack write must be inside `deliver`, found it inside `{}`",
             enclosing.split('(').next().unwrap_or("?")
+        );
+    }
+
+    /// ADR-0010: exactly two things may reach `deliver` — a human clicking Approve, and
+    /// auto-send from the scheduler. A third caller would be a path to Slack nobody chose.
+    #[test]
+    fn only_approve_and_auto_send_reach_deliver() {
+        let sources: [(&str, &str); 3] = [
+            ("routes.rs", include_str!("routes.rs")),
+            ("scheduler.rs", include_str!("scheduler.rs")),
+            ("main.rs", include_str!("main.rs")),
+        ];
+
+        let mut callers: Vec<(&str, String)> = Vec::new();
+        for (name, source) in sources {
+            let source_lines: Vec<&str> = production(source).lines().collect();
+            for (index, raw) in source_lines.iter().enumerate() {
+                let line = raw;
+                let code = line.split("//").next().unwrap_or("").trim();
+                if code.is_empty() || code.starts_with("//") {
+                    continue;
+                }
+                // The definition itself. A doc comment may also mention `deliver`, but a `///` line
+                // strips to empty above.
+                if code.contains("fn deliver(") {
+                    continue;
+                }
+                // `deliver(` also matches `crate::routes::deliver(`, which is the form
+                // the scheduler uses — matching on the bare name would miss it, which is
+                // exactly how a test could pass while the thing it guards was unguarded.
+                //
+                // The `is_deliver_call` guard keeps this test's own source out: the string
+                // literals here contain "deliver(", and it reads its own file.
+                // `deliver(` also matches `crate::routes::deliver(`, which is the form
+                // the scheduler uses, so matching on the bare name is deliberate. The
+                // test module is already excluded by `production`, so this cannot match
+                // itself.
+                if code.contains("deliver(") {
+                    // Name the enclosing fn so the failure says who posted.
+                    let before = source_lines[..=index].join("\n");
+                    let enclosing = before
+                        .rsplit("async fn ")
+                        .next()
+                        .unwrap_or("")
+                        .split('(')
+                        .next()
+                        .unwrap_or("?")
+                        .to_string();
+                    callers.push((name, enclosing));
+                }
+            }
+        }
+
+        assert_eq!(
+            callers.len(),
+            2,
+            "exactly two callers may reach Slack — `approve` and `auto_send` — found {callers:?}"
+        );
+        let names: Vec<&str> = callers.iter().map(|(_, f)| f.as_str()).collect();
+        assert!(
+            names.contains(&"approve") && names.contains(&"auto_send"),
+            "the two callers must be `approve` and `auto_send`, found {names:?}"
         );
     }
 

@@ -5,22 +5,40 @@
 // cheap to re-check after every change.
 //
 //   cargo run
-//   node ui/verify.mjs                 # every check
-//   node ui/verify.mjs --only=float    # one group
+//   node ui/verify.mjs   # every check
 //
 // `shot.mjs` and `drive.mjs` stay separate: they write screenshots for a human.
 
+import { existsSync } from "node:fs";
 import puppeteer from "puppeteer-core";
 
-const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+// Chrome, wherever this is running. Hardcoding the macOS path meant the script could
+// only ever work on the machine that wrote it — and CI runs on Linux.
+const CHROME = process.env.SB_CHROME || resolveChrome();
+
+/** First known Chrome path that exists. */
+function resolveChrome() {
+  const known = [
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ];
+  const found = known.find((p) => existsSync(p));
+  if (!found) {
+    throw new Error(
+      `no Chrome found. Set SB_CHROME to a Chrome or Chromium binary. Tried:\n  ${known.join("\n  ")}`,
+    );
+  }
+  return found;
+}
 const URL = process.env.SB_URL || "http://127.0.0.1:7321/";
 const WIDTHS = [
   [1440, 900],
   [1024, 768],
   [390, 844],
 ];
-
-const only = process.argv.find((a) => a.startsWith("--only="))?.split("=")[1];
 
 const results = [];
 const check = (group, name, pass, detail) =>
@@ -189,7 +207,7 @@ for (const [width, height] of WIDTHS) {
 }
 
 // Every tab, once, at the default width — the states that only exist after interaction.
-if (!only || only === "tabs") {
+{
   const page = await browser.newPage();
   const problems = [];
   page.on("pageerror", (e) => problems.push(e.message));
