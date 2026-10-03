@@ -31,9 +31,15 @@ include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 ///
 /// Vite emits exactly three kinds of file (plus sourcemaps, which the browser fetches
 /// only when devtools are open). An unknown extension gets `application/octet-stream`,
-/// which is correct if unhelpful — and there is no correct alternative worth a lookup
-/// table of its own.
+/// which is correct if unhelpful.
+///
+/// `/` is the exception and needs naming rather than deriving: it has no extension, and it
+/// is the document. Deriving from it produced `application/octet-stream`, which the
+/// browser downloads instead of rendering — a blank page with no error anywhere.
 fn content_type(path: &str) -> &'static str {
+    if path == "/" || path.ends_with('/') {
+        return "text/html; charset=utf-8";
+    }
     match path.rsplit_once('.').map(|(_, ext)| ext) {
         Some("html") => "text/html; charset=utf-8",
         Some("js" | "mjs") => "text/javascript; charset=utf-8",
@@ -53,14 +59,23 @@ fn assets() -> axum::Router {
     // `fallback` covers every path and every method, so one handler serves the whole tree.
     axum::Router::new().fallback(get(|req: axum::extract::Request| async move {
         // The path is all an asset's identity depends on; a cache-busting query is not
-        // part of it. `/` is the one alias, because `dist/` holds a file called
-        // `index.html` and no file called ``.
+        // part of it.
         let path = req.uri().path();
-        let wanted = if path == "/" { "/index.html" } else { path };
 
-        match ASSETS.iter().find(|(url, _)| *url == wanted) {
+        // Exact match first, then the one alias — and the order is load-bearing.
+        // A built tree holds `/index.html` and no `/`, so an alias-first lookup 404s on
+        // a page that is sitting right there. But when `dist/` is missing the table holds
+        // `/` and no `/index.html`, so it is the *exact* match that must come first for
+        // the fallback page to be served at all. Neither order serves both cases.
+        let asset = ASSETS.iter().find(|(url, _)| *url == path).or_else(|| {
+            (path == "/")
+                .then(|| ASSETS.iter().find(|(url, _)| *url == "/index.html"))
+                .flatten()
+        });
+
+        match asset {
             Some((_, body)) => {
-                ([(header::CONTENT_TYPE, content_type(wanted))], *body).into_response()
+                ([(header::CONTENT_TYPE, content_type(path))], *body).into_response()
             }
             // A miss gets a real 404 rather than the index page. Serving `index.html`
             // for a missing asset would turn a stale `dist/` into a blank screen with no

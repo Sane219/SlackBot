@@ -42,7 +42,19 @@ fn main() {
     );
 
     if files.is_empty() {
-        let _ = write!(body, "    (\"/\", include_str!(\"unbuilt.html\")),");
+        // Absolute, because `include_str!` resolves relative to *this* generated file,
+        // which lives in OUT_DIR — not relative to `src/`, and not relative to the crate
+        // root. A bare "unbuilt.html" compiled fine on macOS only because a stale OUT_DIR
+        // still held a copy; on a clean checkout it is a hard error, which is the one
+        // situation the fallback exists for.
+        let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("unbuilt.html");
+        let _ = write!(
+            body,
+            "    (\"/\", include_str!({:?})),",
+            fallback.display().to_string()
+        );
     } else {
         for (url, path) in &files {
             println!("cargo:rerun-if-changed={}", path.display());
