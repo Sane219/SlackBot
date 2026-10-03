@@ -80,8 +80,10 @@ The single place unapproved Drafts wait, newest first.
 _Avoid_: Queue, review list, outbox
 
 **Approve**:
-The deliberate act of sending a Draft to its channel as a Post. Approve is the only
-action in this tool that reaches Slack. There is no path that sends without it.
+The deliberate act of a human sending a Draft to its channel as a Post. Approve and
+auto-send are the only two paths that reach Slack; both go through `deliver`, which is the
+only function that calls `chat.postMessage`. Auto-send is off until turned on in Setup
+(ADR-0010) and never sends a gap or a partial Draft.
 _Avoid_: Post, submit, publish, confirm
 
 ## The two model roles

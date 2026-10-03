@@ -1,5 +1,27 @@
 # Never post without an explicit Approve
 
+**Status:** Accepted; the "no code path" claim is superseded by
+[ADR-0010](0010-auto-send.md). The reasoning below still holds — see the note
+at the top of this file.
+
+## Alternatives considered
+
+### Always approve, once the user has approved a previous Draft
+The obvious friction-killer: "you approved one, so the routine is trusted." Rejected — it
+makes the *first* wrong post the only one the user ever sees, and there is no way back from
+it. The user asked for auto-send and got it, as a switch they turn on knowingly rather than
+as a precedent that accumulates.
+
+### Draft-and-send with an undo window
+Send immediately, delete after N minutes unless objected. Rejected outright: `chat.delete`
+is not available on the session-token path (ADR-0002), so there is no undo. The premise of
+the option does not hold here.
+
+### Confidence threshold
+Send only when the model is confident enough. Rejected — confidence is not calibrated and
+would be the worst possible thing to make an irreversible decision on. A Fire that collected
+one message is "high confidence" and is still not a status update.
+
 > **Partly superseded by [ADR-0010](0010-auto-send.md).** The reasoning below still holds:
 > a wrong post under your own name is unrecoverable. What changed is that the user can now
 > choose, once, in Setup, to have Drafts posted without a click. The default is still off,

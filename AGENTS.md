@@ -1,18 +1,26 @@
 # SlackBot
 
 A local Rust daemon that drafts Slack status posts from your real activity — your
-Slack messages and your work recorded in GitHub — on a schedule, and posts them
-only when you click Approve.
+Slack messages and your work recorded in GitHub — on a schedule, and posts them only when
+you click Approve.
 
-`cargo run` starts an Axum server on `127.0.0.1:7317` and opens a browser UI.
-You configure the LLM, Slack credentials, and your posting routine once; after that
-it drafts. Nothing is ever posted without an explicit click.
+`cargo run` starts an Axum server on `127.0.0.1:7317` and opens a browser UI. You
+configure the LLM, Slack credentials, and your posting routine once; after that it drafts.
+By default nothing is posted without an explicit click. A switch in Setup turns on
+auto-send (ADR-0010) — it is off until turned on, and it still refuses a window that
+collected nothing or is missing a source.
 
 ## Before designing anything
 
 Read `docs/adr/` first. **Where an ADR and `idea.md` disagree, the ADR wins** —
 `idea.md` is the record of the original thinking, not current truth, and it carries
-a header mapping each reversal.
+a header mapping each reversal. `PRODUCT.md` and `GLOSSARY.md` are current; `idea.md` is
+not, by design.
+
+Every ADR has a `## Status` line and a `## Alternatives considered` section. When you
+reverse a decision, write a new ADR that names the one it supersedes and add the Status
+line — do not edit the old ADR's reasoning, only its status. The reasoning is why the
+decision was right at the time and is worth keeping even once it is wrong.
 
 ## Before touching the UI
 

@@ -1,5 +1,7 @@
 # The tool imposes no house vocabulary
 
+**Status:** Accepted.
+
 The names and shapes of a team's recurring status messages are learned from the
 description its users give at setup, and stored per Job. The code contains no canonical
 names for them.
@@ -14,6 +16,22 @@ Status" something the team never asked for.
 Making the vocabulary user-supplied also puts it in one place. The Job already holds a
 prompt template, a channel, and a window; the message name and shape belong beside them,
 not in a constant.
+
+## Alternatives considered
+
+### A built-in vocabulary, seeded from one reference team
+- Pros: works immediately, no setup step.
+- Cons: correct in exactly one workspace and misleading everywhere else, and it fails
+  quietly — the tool keeps working and keeps calling a team's "Day Status" something
+  they never asked for.
+- Rejected: a tool that is confidently wrong about your team's language is worse than one
+  that asks.
+
+### Let the model invent names per post
+- Pros: no stored state at all.
+- Cons: "Progress Update" on Tuesday and "Progress Note" on Wednesday is not a house
+  style, and the inconsistency is invisible until someone notices.
+- Rejected: learn it once, from the user's own description, store it per Job.
 
 ## Consequences
 

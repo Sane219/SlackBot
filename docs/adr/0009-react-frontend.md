@@ -1,5 +1,7 @@
 # ADR-0009 — The UI is React, built ahead of time and committed
 
+**Status:** Accepted.
+
 The front end is React, built with Vite to `dist/`, committed to the repository, and
 embedded in the Rust binary with `include_str!`. There is no build step at run time.
 
@@ -19,6 +21,30 @@ one.
 The commit-and-embed split keeps the promise that actually matters. `cargo run` still
 means `cargo run` — no `npm install`, no Node on the run path. Only *changing* the UI
 requires a build, and that is a contributor-time cost rather than a user-time one.
+
+## Alternatives considered
+
+### Load React from a CDN at runtime
+- Pros: genuinely no build step; nothing to version.
+- Cons: a local tool that needs the internet to start, and the first paint waits on a
+  third party. For a tool whose whole premise is running from one command on a laptop,
+  that is the wrong trade.
+- Rejected.
+
+### Ship a full build step, accept it
+- Pros: cleanest day-to-day development, standard tooling.
+- Cons: `cargo run` stops meaning `cargo run`. The spec committed to that in the first
+  place, and it is the promise users actually rely on.
+- Rejected: the build is a contributor-time cost, and only contributors pay it.
+
+### Keep hand-written DOM manipulation
+- Pros: no dependency, no build, no framework.
+- Cons: this is what the tool started with, and it had already produced a class of bug
+  that a framework structurally prevents — visibility managed by hand, where a class's
+  `display: flex` silently beats the `hidden` attribute. In a UI of three tabs that is one
+  bug; in a UI with a job editor, a checklist and an evidence disclosure there are more.
+- Rejected: the framework is paying for itself in correctness before it is paying for
+  itself in convenience.
 
 ## Consequences
 

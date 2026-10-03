@@ -1,5 +1,9 @@
 # Setup is one board with three verified credential rows
 
+**Status:** Accepted, and partly overtaken by [ADR-0009](0009-react-frontend.md)
+(React) and by `docs/UX.md` (the checklist is now four steps, three of which are
+credentials).
+
 The setup surface is the same incident board as the Inbox: a code column on the left
 (`LLM`, `SLK`, `GH`) and the field on the right. No wizard, no stepper, no tabs. Each row
 carries a live verification mark that changes only when the user asks for it.
@@ -12,6 +16,20 @@ answer it. Three credentials for one person is a list, and lists read better tha
 
 The world also has an opinion about this: an operations board shows every channel's state
 at once, because a responder who has to open a drawer to check one line does not check it.
+
+## Alternatives considered
+
+### One screen per credential
+- Pros: each field gets the whole screen; simplest possible layout.
+- Cons: answering "what is configured and what is broken" takes three clicks, and a
+  three-click answer to a one-glance question is a question that does not get asked.
+- Rejected: three credentials for one person is a list, and lists read better than steps.
+
+### A wizard with a Next button
+- Pros: a familiar onboarding shape.
+- Cons: hides the state of the two credentials you have not reached yet, which is exactly
+  what a returning user needs to see.
+- Rejected: everything visible at once.
 
 ## Consequences
 

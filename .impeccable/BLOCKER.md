@@ -64,7 +64,43 @@ Two findings were adjudicated rather than obeyed:
   *were* drifting toward the generic pattern, so they became one continuous strip down
   the spine. `border-left: 3px` no longer appears anywhere.
 
+## BLOCKER.md — why this file exists
+
+## The comp round was unavailable, not skipped
+
+The visual system was worked without a rendered comparison. The environment had no
+`OPENAI_API_KEY`, no image tool, and no `serve-question` verb in the installed v4.2.0
+binary. Nothing was substituted to fake one. The system in `DESIGN.md` was written by
+hand from the built CSS and then verified token by token against it.
+
+**This is stale in one respect:** the installed engine now reports v4.5.0 skill files, so
+the missing verbs may be available. Re-running a comp round would be the way to close this
+properly.
+
+## The hatch's repeating gradient *is* the gap, deliberately
+
+One detector finding is accepted rather than fixed: the hatch uses a `repeating-linear-gradient`
+where a solid fill would do. There is no hand-drawn alternative — a gap is drawn as a gap,
+and the stripes are the drawing. `--rule` at 1px on `--grid-soft` is indistinguishable from
+the rules around it, which is the point: the void has to read as void, not as a component.
+
+## A stale reference in the sidecar
+
+`.impeccable/design.json` was generated from the pre-React UI. Its 6 component snippets
+were checked against the current `ui/src/styles.css` and every class in them still exists
+(the classes were carried across the migration), so it is usable as-is. It names no file
+paths, so it did not rot. If a future UI change removes one of those classes, the sidecar
+needs regenerating rather than hand-editing.
+
 ## Known gaps
+
+- `impeccable detect` has not been run against the React components. It was not on `PATH`
+  when the UI was rewritten.
+- No Windows CI job, so the cross-platform claim is checked once by hand rather than
+  continuously (`cargo check --target x86_64-pc-windows-msvc` passes as far as the bundled
+  SQLite C build, which needs Visual Studio Build Tools).
+- No real end-to-end run: every Fire to date has been driven by mocks or a seeded database.
+  No genuine Slack or GitHub credentials have ever driven a Fire through auto-send.
 
 Not fixed, and recorded rather than assumed away:
 

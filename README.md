@@ -80,19 +80,38 @@ a personal, single-user tool on purpose.
 - Rust 1.75 or newer
 - A Slack session, a GitHub token, and an OpenAI-compatible endpoint
 
-## Development
+Node is **not** needed to run this. The UI is pre-built and committed to `dist/`, embedded
+in the binary at compile time. Node is only needed to *change* the UI.
 
-```
-cargo test                                   # 87 unit tests
-cargo run                                    # the app
-cargo test --test e2e -- --ignored           # 13 HTTP tests, needs a running server
-```
+On Windows, building requires Visual Studio Build Tools (bundled SQLite is compiled from
+source). macOS and Linux need nothing extra.
 
-The unit tests never touch the network, your keychain, or Slack. HTTP clients are
-tested against `wiremock`; the secret store is tested through an in-memory double.
+## Commands
 
-CI runs format, clippy with `-D warnings`, the unit tests, and the end-to-end suite
-against a real server on a scratch database.
+| Command | What it does |
+|---|---|
+| `cargo run` | The app. Opens the board in a browser. |
+| `cargo test` | 107 unit tests. No network, no keychain, no Slack. |
+| `cargo test --test e2e -- --ignored` | 19 HTTP tests. Needs a running server. |
+| `cargo clippy --all-targets` | Lints. CI treats warnings as errors. |
+| `npm --prefix ui run build` | Rebuild the UI into `dist/`. **Then `cargo build`** — the binary embeds `dist/` at compile time, so skipping it serves the previous UI. |
+| `npm --prefix ui run verify` | 34 browser checks at three widths. Needs a running server. |
+| `scripts/seed-demo-db.sh <db>` | Fill a throwaway database with Jobs, Fires and Drafts, so the UI can be looked at without real credentials. |
+
+CI also fails a pull request whose committed `dist/` does not match `ui/src` (ADR-0009).
+
+## Architecture
+
+A single Rust binary on loopback, SQLite for state, secrets in the OS keychain. Ten ADRs
+in `docs/adr/` record the decisions that were expensive to reverse; the three that most
+often surprise a reader:
+
+- **0001 / 0010** — what reaches Slack, and why auto-send exists but is off by default.
+- **0002** — a session token rather than an OAuth app, and what that costs.
+- **0006** — why message content is never written to disk.
+
+`docs/UX.md` is the user flow and why each step is shaped the way it is. `DESIGN.md` is
+the visual system. `GLOSSARY.md` defines the domain words — use those.
 
 ## Where things live
 
@@ -105,8 +124,10 @@ against a real server on a scratch database.
 | `src/evidence.rs` | Turning activity into the text the model reads |
 | `src/llm.rs` | The model client, and the two separate roles |
 | `src/scheduler.rs` | The Fire loop |
-| `src/routes.rs` | The HTTP surface |
-| `src/web/` | The board |
+| `src/routes.rs` | The HTTP surface, and `deliver` — the only function that reaches Slack |
+| `ui/src/` | The React board |
+| `dist/` | The built UI. **Committed**, and embedded by `build.rs` (ADR-0009) |
+| `build.rs` | Walks `dist/` and generates the embedded asset table |
 
 `docs/adr/` records the decisions that are hard to reverse, and `GLOSSARY.md` the
 vocabulary. `AGENTS.md` points at both and says which wins.

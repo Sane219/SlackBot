@@ -1,5 +1,7 @@
 # Authenticate to Slack with a user session token, not an OAuth app
 
+**Status:** Accepted.
+
 Reads and writes go through an `xoxc-…` user token paired with the session's `d` cookie,
 sent as `Authorization: Bearer` plus `Cookie: d=`. There is no Slack app, no OAuth
 install, and no bot identity.
@@ -14,6 +16,20 @@ app in the company's Slack, which is not ours to add.
 
 The session token has no consent screen, no app in the workspace, and no install step —
 just two fields pasted into a setup page.
+
+## Alternatives considered
+
+### An OAuth app (`xoxp-…`)
+- Pros: Slack's supported path, scopes are explicit, no cookie to go stale.
+- Cons: every post carries a visible "Sent via a bot app" artifact in a channel the
+  team reads, and it adds an app to a company workspace that is not ours to modify.
+- Rejected: the artifact defeats the purpose of a post meant to read as human.
+
+### `chat.postMessage` as a bot (`xoxb-…`)
+- Pros: no user token at all; simplest auth.
+- Cons: the post is visibly from a bot, always, and it cannot read the human's own
+  messages as "mine".
+- Rejected: same reason, and it also breaks the self-filter that makes evidence yours.
 
 ## Consequences
 

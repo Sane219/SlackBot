@@ -1,5 +1,7 @@
 # A Fire either produces a Draft or records why it did not
 
+**Status:** Accepted.
+
 Every time a Job comes due, exactly one `Fire` row is written, with an outcome. The
 outcomes are `drafted`, `partial`, `failed`, `skipped` and `missed`. There is no silent
 path: a scheduler tick that does anything at all writes a row.
@@ -10,6 +12,28 @@ ADR-0001 makes a missed Fire a visible gap rather than a non-event, because sile
 failure is the single outcome that makes an unattended tool untrustworthy. That promise
 is only keepable if every terminal state is recorded, including the ones where nothing
 went wrong in the usual sense — a laptop asleep, an app that was not running.
+
+## Alternatives considered
+
+### Catch up on startup (launchd / Task Scheduler)
+- Pros: a laptop that was asleep at 09:30 posts at 10:00 instead of showing a gap.
+- Cons: it invents a Fire that never happened, at a time that is not the one the user
+  scheduled, with a window that has since moved. The post is then true of neither time.
+- Rejected: the user chose to keep the app running. A missed Fire is recorded and shown,
+  never retro-fired.
+
+### Treat a missed Fire as "skipped"
+- Pros: fewer codes.
+- Cons: "skipped" is already a terminal state meaning something else (a duplicate due
+  time within one tick). Reusing it would make a laptop asleep indistinguishable from a
+  no-op, which is the opposite of the point.
+- Rejected: a distinct `MIS` code, with the hatched void in the spine.
+
+### Only record failures
+- Pros: a shorter log.
+- Cons: a quiet day and a broken day both produce no row, and the distinction between
+  "nothing happened" and "we did not look" is the entire argument for this tool.
+- Rejected: record every terminal state, including the uneventful ones.
 
 ## Consequences
 

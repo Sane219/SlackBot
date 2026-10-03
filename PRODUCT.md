@@ -40,12 +40,15 @@ enough to send, and a Day Summary indistinguishable in style from one written by
 
 The reconstruction is mechanical and the judgement is human, so the tool does only the
 first half. It gathers evidence from the places the work actually happened, renders it
-once, and proposes a post — and a human always presses the button.
+once, and proposes a post — and by default a human presses the button.
 
-The differentiator is that it never posts on its own. Neighbouring tools (cron-plus-LLM
-scripts, Slack bots, status-report generators) auto-send. This one structurally cannot:
-Approve is the only code path that reaches Slack, and that is a tested property rather
-than a setting.
+The differentiator is that the judgement stays explicit by default and is a one-time
+choice when you want it otherwise. Neighbouring tools (cron-plus-LLM scripts, Slack bots,
+status-report generators) auto-send with no option. This one waits for a click, and offers
+auto-send as a switch you deliberately turn on (ADR-0010) — never as the default, and
+never for a window that collected nothing or is missing a source. Both paths go through
+`deliver`, the only function that reaches Slack, which is a tested property rather than a
+convention.
 
 ## Operating Context
 
@@ -94,8 +97,10 @@ labelled synthetic. Nothing about adoption, accuracy, or time saved may be claim
 
 ## Product Principles
 
-1. **The tool drafts, the human sends.** Approve is the only path to Slack, and that is a
-   property of the code rather than a preference.
+1. **The judgement stays explicit.** By default a human sends. Auto-send exists as a
+   deliberate one-time choice (ADR-0010), and it still refuses a gap or a partial Draft.
+   `deliver` is the only path to Slack either way, and that is a property of the code
+   rather than a preference.
 2. **Say nothing rather than invent.** A thin day produces a visibly thin Draft. ADR-0003
    requires the morning post, whose evidence is weakest, to be willing to say nothing.
 3. **A failure must be visible.** A missed or broken Fire shows as a gap in the Inbox.

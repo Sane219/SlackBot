@@ -1,9 +1,40 @@
 # ADR-0010 — Auto-send posts a Draft without a human
 
+**Status:** Accepted. Supersedes the "only a click reaches Slack" half of
+[ADR-0001](0001-never-post-without-approve.md).
+
 **Status:** accepted. Supersedes the "only a click reaches Slack" half of ADR-0001.
 
 A Draft is posted as soon as it is written, when the user has turned auto-send on. It is
 one switch in Setup, off by default, and nothing else in the app can turn it on.
+
+## Alternatives considered
+
+### Per-Job switch
+- Pros: safer shape. One misclick sends one post rather than three, and a boilerplate
+  summary can go unattended while a morning task still waits for a human.
+- Cons: three switches on one screen is three chances to forget one is off, which is a
+  silent failure — the dangerous kind.
+- Rejected: asked, and one switch for everything was chosen. The routine is uniform — if
+  the 18:30 summary is trusted, the 09:30 task is trusted — so the granularity bought
+  nothing. The ceiling and the upgrade path are recorded under Scope below.
+
+### Unconditional, no refusals
+- Pros: fewer lines; every Draft goes.
+- Cons: a `partial` Draft says in its own text that a source failed. Posting that to a
+  team channel at 14:30 with nobody watching is a defect report, not a status update, and
+  it cannot be taken back.
+- Rejected: two one-line refusals. The rule is "auto-send declines by leaving the Draft in
+  the Inbox", which needs no new state and means a bad window is still visible.
+
+### Approve now, send at the scheduled time
+- Pros: removes the click *and* keeps a human in the loop at drafting time — arguably the
+  best shape of the three.
+- Cons: requires the app to be running and the tab to be open at 09:30, which reintroduces
+  exactly the attendance ADR-0007 removed. It also needs a second state (reviewed but
+  unsent) to distinguish "not looked at yet" from "looked at and approved".
+- Rejected: it is the right answer if attendance is acceptable and the wrong one if it
+  is not. Recorded here because it is the obvious next request.
 
 ## Why
 

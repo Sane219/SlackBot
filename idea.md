@@ -132,7 +132,10 @@ completely different contracts and must not share a prompt.
   prompt template + rendered activity context.
 - **Output:** plain Slack mrkdwn text. No JSON, no preamble, no code fence.
 - **Posture:** deterministic-ish. Same context, same temperature, roughly same
-  draft. Never posts.
+  draft. Never posts. *(Superseded on this point by
+  [ADR-0010](docs/adr/0010-auto-send.md): the role still never posts, but
+  auto-send can post what the role wrote, when the user has turned it on.
+  Per `AGENTS.md`, the ADR wins.)*
 
 Keeping these separate means a hallucinating draft model can never invent a
 schedule, and a rambling setup model can never produce a half-formed post.

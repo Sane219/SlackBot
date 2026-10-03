@@ -1,5 +1,7 @@
 # A Draft stores its text, its window, its counts and its parent — nothing more
 
+**Status:** Accepted.
+
 `Draft` holds the rendered text, the Context Window it was drawn from, the source counts
 that rendering reported, the Job and Fire that produced it, and a nullable reference to
 the Draft it was seeded from. The Evidence text itself is not stored, per the standing
@@ -15,6 +17,28 @@ Seeding prefers the **last edited** text, not the last generated text. A user wh
 yesterday's summary has already decided what matters, and re-deriving from raw evidence
 would discard that judgement. A discarded Draft is removed from the chain and the
 grandparent becomes the seed.
+
+## Alternatives considered
+
+### Store the raw evidence alongside the Draft
+- Pros: a Draft could be explained or re-derived exactly.
+- Cons: company message content on disk, in a tool that is otherwise careful about this.
+  ADR-0002 established that credentials never touch a file; content is a larger leak than
+  a token because it is readable, and it is duplicated in Slack anyway.
+- Rejected: keep counts and the window, discard the source. Re-`Regenerate` re-fetches.
+
+### Store only the Draft text, no window or counts
+- Pros: the smallest schema.
+- Cons: a Draft cannot be explained, and Regenerate cannot re-fetch the *original* window
+  without knowing it — the text could drift to mean something else by pressing a button
+  on Thursday.
+- Rejected: the window is not evidence, it is provenance, and it is small.
+
+### Seed from the last *generated* Draft
+- Pros: simpler; seeding ignores edits.
+- Cons: a user who rewrote yesterday's summary has already decided what matters, and
+  re-deriving from raw evidence discards that judgement.
+- Rejected: prefer the last *edited* text.
 
 ## Consequences
 
