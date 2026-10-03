@@ -21,12 +21,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-
+      # No Node here. `check` is Rust-only; the `ui` and `e2e` jobs set up Node
+      # themselves, and an unused setup step is a cache restore nobody reads.
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -67,17 +63,9 @@ jobs:
             exit 1
           fi
 
-      # The browser checks. They need a running server, so this is the one place they can
-      # run unattended — they were previously never run by anything, which is why two dead
-      # scripts accumulated alongside them.
-      #
-      # puppeteer-core needs a browser binary. Chrome is preinstalled on ubuntu-latest, so
-      # no download is required; `SB_CHROME` overrides it elsewhere.
-      - name: Browser checks
-        env:
-          SB_CHROME: /usr/bin/google-chrome
-        run: npm --prefix ui run verify
-
+      # The page must reference only assets that are embedded. Read the paths out of the
+      # built page and check each is in dist/, so a bundle that exists but is unreferenced
+      # fails in the job that built it rather than as a blank page for a user.
       - name: The page must reference only assets that are embedded
         run: |
           # Reads the paths out of the built page and checks each is in dist/, which is
@@ -102,6 +90,11 @@ jobs:
 
   # The end-to-end suite needs a listening server, so it runs after a build rather than
   # as part of `cargo test`. Without this the HTTP contract is only ever checked by hand.
+  #
+  # The browser checks live here too, not in `ui`: they need a server, and this is the
+  # only job that starts one. They ran in `ui` for one commit, where they failed on every
+  # run with ERR_CONNECTION_REFUSED — a check that cannot pass is worse than no check,
+  # because it looks like coverage.
   e2e:
     runs-on: ubuntu-latest
     steps:
@@ -112,6 +105,16 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install the UI toolchain
+        working-directory: ui
+        run: npm ci
 
       - name: Build
         run: cargo build
@@ -136,6 +139,13 @@ jobs:
         env:
           SLACKBOT_E2E_URL: http://127.0.0.1:7321
         run: cargo test --test e2e -- --ignored --test-threads=1
+
+      # puppeteer-core needs a browser binary. Chrome is preinstalled on ubuntu-latest,
+      # so nothing is downloaded; `SB_CHROME` overrides it elsewhere.
+      - name: Browser checks
+        env:
+          SB_CHROME: /usr/bin/google-chrome
+        run: npm --prefix ui run verify
 
       - name: Server log
         if: always()

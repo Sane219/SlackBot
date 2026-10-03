@@ -107,34 +107,22 @@ for (const [width, height] of WIDTHS) {
     JSON.stringify(panels),
   );
 
-  // Every spine row with a time shows one. A prop mismatch (`clock: at` against callers
-  // passing `at`) silently rendered the whole column blank.
-  const spine = await page.evaluate(() => {
-    const rows = [...document.querySelectorAll(".fire")];
-    return {
-      rows: rows.length,
-      withClock: rows.filter((r) => r.querySelector(".fire__clock")).length,
-      hatches: document.querySelectorAll(".hatch").length,
-      srOnly: document.querySelectorAll(".fire .sr-only").length,
-    };
-  });
-  const clocked = await page.evaluate(
-    () =>
-      [...document.querySelectorAll(".fire")]
-        .filter((r) => r.querySelector(".fire__code"))
-        .map((r) => Boolean(r.querySelector(".fire__clock"))),
+  // Every spine row that stands for a Fire shows a time. A prop mismatch
+  // (`clock: at` against callers passing `at`) silently rendered the whole column blank.
+  //
+  // Excludes the placeholder rows, which have no Fire behind them and so have no time:
+  // "connecting…" and "no fires yet". Counting those would make this check fail on a
+  // fresh install, which is exactly the state a new contributor sees first.
+  const clocked = await page.evaluate(() =>
+    [...document.querySelectorAll(".fire")]
+      .filter((r) => !r.querySelector(".fire__code")?.textContent.includes("SYS"))
+      .map((r) => Boolean(r.querySelector(".fire__clock"))),
   );
   check(
     "spine",
-    `${tag} every coded row shows a time`,
+    `${tag} every Fire row shows a time`,
     clocked.length === 0 || clocked.every(Boolean),
     clocked.filter((c) => !c).length + " rows without a clock of " + clocked.length,
-  );
-  check(
-    "spine",
-    `${tag} each hatch has a spoken sentence`,
-    spine.hatches <= spine.srOnly,
-    `${spine.hatches} hatches, ${spine.srOnly} sr-only sentences`,
   );
 
   // Every tab stop has a visible focus ring. WCAG AA, and it was checked in a browser.
@@ -201,6 +189,21 @@ for (const [width, height] of WIDTHS) {
       zones[0],
     );
   }
+
+  // A gap is a picture *and* a sentence: the hatch is decorative and aria-hidden, and
+  // an sr-only span beside it states that nothing was collected. Checked together, so a
+  // hatch can never ship without its sentence.
+  const gap = await page.evaluate(() => {
+    const hatches = document.querySelectorAll(".fire .hatch").length;
+    const spoken = document.querySelectorAll(".fire .sr-only").length;
+    return { hatches, spoken };
+  });
+  check(
+    "spine",
+    `${tag} each hatch has a spoken sentence`,
+    gap.hatches <= gap.spoken,
+    `${gap.hatches} hatches, ${gap.spoken} spoken sentences`,
+  );
 
   check("console", `${tag} no console errors or failed requests`, problems.length === 0, problems.join(" | "));
   await page.close();

@@ -12,14 +12,14 @@
 # row fails. Writing one is how this seed spent an afternoon looking for a database bug.
 set -euo pipefail
 
+# Refuse to run twice. Appending to a seeded database leaves drafts pointing at fire ids
+# that were never inserted, which looks exactly like a data bug.
 db="${1:?usage: seed-demo-db.sh <path-to.db>}"
 [ -f "$db" ] || { echo "no database at $db" >&2; exit 1; }
 
-# Refuse to run twice. Appending to an already-seeded database leaves drafts pointing at
-# fire ids that were never inserted, which looks exactly like a data bug.
 existing=$(sqlite3 "$db" "SELECT count(*) FROM jobs;" 2>/dev/null || echo 0)
 if [ "$existing" != "0" ]; then
-  echo "$db already has $existing job(s). Delete it and restart the server first." >&2
+  echo "$db already has $existing job(s). Stop the server, delete it, start the server again." >&2
   exit 1
 fi
 
