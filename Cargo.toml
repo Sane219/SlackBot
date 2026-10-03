@@ -30,7 +30,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 rusqlite = { version = "0.37", features = ["bundled"] }
 
 # Secrets never touch the config file. Behind a trait so tests can substitute.
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { version = "3", features = [] }
 
 # Wall-clock scheduling. Timezones are per Job, never global.
 chrono = { version = "0.4", features = ["serde"] }
@@ -38,6 +38,25 @@ chrono-tz = "0.10"
 
 # Error ergonomics for a library surface.
 thiserror = "2"
+
+# The keyring store is platform-specific, so its features are declared per platform rather
+# than all three at once. Declaring them together made every platform compile every store —
+# including the Linux secret-service store and its `libdbus-sys` C dependency, which needs
+# `libdbus-1-dev` and `pkg-config` to build. That requirement only ever showed up on CI,
+# because macOS compiles libdbus from source and Windows has a native API.
+#
+# Linux needs: `sudo apt install libdbus-1-dev pkg-config`.
+#
+# These tables live at the end of the file on purpose. A `[target.'…'.dependencies]` header
+# starts a new TOML table, so anything placed after one stops being a plain dependency.
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

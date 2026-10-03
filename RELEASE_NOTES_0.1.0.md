@@ -15,8 +15,9 @@ Visual Studio Build Tools, so it is one prerequisite away from the same status.
 `cargo run`, and a browser opens. That is the whole install — no Node, no Docker, no
 service to configure.
 
-On macOS and Linux as-is. On Windows you need Visual Studio Build Tools, because the
-embedded SQLite is compiled from source.
+macOS and Linux as-is, except that **Linux needs `libdbus-1-dev` and `pkg-config`** for
+the secret-service store it links against. On Windows you need Visual Studio Build Tools,
+because the embedded SQLite is compiled from source.
 
 ## What it does
 
@@ -61,7 +62,8 @@ If auto-send skips something, the Draft is simply still there when you open the 
 
 - **No Fire has ever run against real Slack and GitHub credentials.** Everything is
   verified against mocks and a seeded database. The first real run is untested.
-- No Windows CI job. The cross-platform claim was checked once by hand.
+- No Windows CI job. The cross-platform claim rests on a single hand-run
+  `cargo check --target x86_64-pc-windows-msvc`.
 - Not yet run through `impeccable detect`; it was not on `PATH` during the UI rewrite.
 - The comp round behind `DESIGN.md` was unavailable, so the visual system was derived from
   the built CSS rather than compared against a rendering.

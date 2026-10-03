@@ -21,6 +21,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # The Linux secret store is built from C and needs libdbus headers. Without this
+      # every Rust job on this runner fails in libdbus-sys' build script, which is why all
+      # eight runs so far are red.
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+
       # No Node here. `check` is Rust-only; the `ui` and `e2e` jobs set up Node
       # themselves, and an unused setup step is a cache restore nobody reads.
       # The same script `.githooks/pre-commit` runs. They were separate once and drifted:
@@ -103,6 +112,15 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
+
+      # The Linux secret store is built from C and needs libdbus headers. Without this
+      # every Rust job on this runner fails in libdbus-sys' build script, which is why all
+      # eight runs so far are red.
+      - name: System libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
 
       - uses: actions/setup-node@v4
         with:

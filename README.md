@@ -80,11 +80,19 @@ a personal, single-user tool on purpose.
 - Rust 1.75 or newer
 - A Slack session, a GitHub token, and an OpenAI-compatible endpoint
 
+Secrets go in the OS keychain: Keychain on macOS, Credential Manager on Windows, and the
+freedesktop secret service on Linux. The last one is built from C and needs its headers,
+so **on Linux**:
+
+```sh
+sudo apt install libdbus-1-dev pkg-config
+```
+
+Windows needs Visual Studio Build Tools, because the embedded SQLite is compiled from
+source. macOS and Linux need nothing else.
+
 Node is **not** needed to run this. The UI is pre-built and committed to `dist/`, embedded
 in the binary at compile time. Node is only needed to *change* the UI.
-
-On Windows, building requires Visual Studio Build Tools (bundled SQLite is compiled from
-source). macOS and Linux need nothing extra.
 
 ## Commands
 
