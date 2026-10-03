@@ -1,3 +1,15 @@
+## Tags
+
+`status:pre-release` · `type:feature` · `platform:macos` · `platform:linux` · `platform:windows`
+
+Pre-release because **no Fire has run against real Slack and GitHub credentials yet**.
+The code, the tests and the UI are done; the first real run is not. `platform:windows`
+is marked on the strength of a single `cargo check --target x86_64-pc-windows-msvc`,
+not a CI job.
+
+`platform:macos` and `platform:linux` mean verified to build and run there. Windows needs
+Visual Studio Build Tools, so it is one prerequisite away from the same status.
+
 ## The first version you can run
 
 `cargo run`, and a browser opens. That is the whole install — no Node, no Docker, no
@@ -70,3 +82,18 @@ npm --prefix ui run verify                    # 34 browser checks, needs a runni
 ```
 
 The unit tests never touch the network, your keychain, or Slack.
+## Building from source
+
+No release artifacts are attached: this is a Rust program with an embedded UI, and the
+whole install is `cargo run`. Cloning and building is the install.
+
+```sh
+git clone https://github.com/Sane219/SlackBot
+cd SlackBot
+cargo run
+```
+
+`dist/` is committed, so there is no Node step. `cargo run` opens `http://127.0.0.1:7317`.
+
+Windows needs Visual Studio Build Tools for the bundled SQLite. macOS and Linux need
+nothing beyond a Rust toolchain.
